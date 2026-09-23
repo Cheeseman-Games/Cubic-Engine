@@ -1,0 +1,18 @@
+[package]
+name = "cubic-engine"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+web = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys"]
+
+[dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "CanvasRenderingContext2d",
+] }
+
+[profile.release]
+opt-level = "s"
