@@ -1,0 +1,11 @@
+[package]
+name = "cubic-core"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["rendering"]
+rendering = []
+
+[lints]
+workspace = true

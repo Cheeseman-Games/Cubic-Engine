@@ -91,3 +91,52 @@ impl FrameInput {
         self.pressed.contains(&key)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_edges_are_reported_once_per_frame() {
+        let mut input = InputState::new();
+        input.key_down(KeyCode::A);
+        let frame = input.begin_frame();
+        assert!(frame.pressed(KeyCode::A));
+        assert!(frame.released.is_empty());
+
+        let next = input.begin_frame();
+        assert!(!next.pressed(KeyCode::A));
+    }
+
+    #[test]
+    fn held_key_is_down_but_not_pressed_again() {
+        let mut input = InputState::new();
+        input.key_down(KeyCode::Left);
+        input.begin_frame();
+        assert!(input.is_down(KeyCode::Left));
+
+        input.key_down(KeyCode::Left);
+        let frame = input.begin_frame();
+        assert!(!frame.pressed(KeyCode::Left));
+        assert!(input.is_down(KeyCode::Left));
+    }
+
+    #[test]
+    fn release_reports_edge_and_clears_held_state() {
+        let mut input = InputState::new();
+        input.key_down(KeyCode::Enter);
+        input.begin_frame();
+        input.key_up(KeyCode::Enter);
+        let frame = input.begin_frame();
+        assert!(frame.released.contains(&KeyCode::Enter));
+        assert!(!input.is_down(KeyCode::Enter));
+    }
+
+    #[test]
+    fn key_code_from_name_maps_browser_and_desktop_names() {
+        assert_eq!(KeyCode::from_name("a"), Some(KeyCode::A));
+        assert_eq!(KeyCode::from_name("ArrowRight"), Some(KeyCode::Right));
+        assert_eq!(KeyCode::from_name("["), Some(KeyCode::BracketLeft));
+        assert_eq!(KeyCode::from_name("Space"), None);
+    }
+}

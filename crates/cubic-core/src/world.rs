@@ -129,3 +129,86 @@ impl World {
             .filter_map(|(id, slot)| slot.as_mut().map(|c| (id as EntityId, c)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq)]
+    struct Health(i32);
+
+    #[test]
+    fn spawn_insert_get_roundtrip() {
+        let mut world = World::new();
+        let id = world.spawn();
+        world.insert(id, Health(42));
+        assert_eq!(world.get::<Health>(id), Some(&Health(42)));
+        assert!(world.has::<Health>(id));
+    }
+
+    #[test]
+    fn stores_are_created_on_demand_and_types_do_not_collide() {
+        let mut world = World::new();
+        let id = world.spawn();
+        world.insert(id, Health(1));
+        world.insert(id, 3.5f32);
+        assert_eq!(world.get::<Health>(id), Some(&Health(1)));
+        assert_eq!(world.get::<f32>(id), Some(&3.5));
+    }
+
+    #[test]
+    fn get_missing_entity_or_component_is_none() {
+        let mut world = World::new();
+        let id = world.spawn();
+        assert_eq!(world.get::<Health>(id), None);
+        assert_eq!(world.get::<Health>(999), None);
+    }
+
+    #[test]
+    fn removal_takes_component_and_slot_becomes_empty() {
+        let mut world = World::new();
+        let id = world.spawn();
+        world.insert(id, Health(7));
+        assert_eq!(world.remove::<Health>(id), Some(Health(7)));
+        assert_eq!(world.get::<Health>(id), None);
+    }
+
+    #[test]
+    fn despawn_recycles_ids_after_clearing_components() {
+        let mut world = World::new();
+        let a = world.spawn();
+        let b = world.spawn();
+        world.insert(a, Health(1));
+        world.despawn(a);
+        assert_eq!(world.get::<Health>(a), None);
+
+        let recycled = world.spawn();
+        assert_eq!(recycled, a);
+        assert_ne!(recycled, b);
+    }
+
+    #[test]
+    fn iter_visits_each_live_entity() {
+        let mut world = World::new();
+        let a = world.spawn();
+        let b = world.spawn();
+        world.insert(a, Health(1));
+        world.insert(b, Health(2));
+
+        let mut pairs: Vec<(EntityId, i32)> =
+            world.iter::<Health>().map(|(id, h)| (id, h.0)).collect();
+        pairs.sort_by_key(|&(id, _)| id);
+        assert_eq!(pairs, vec![(a, 1), (b, 2)]);
+    }
+
+    #[test]
+    fn iter_mut_allows_component_updates_in_place() {
+        let mut world = World::new();
+        let id = world.spawn();
+        world.insert(id, Health(3));
+        for (_, h) in world.iter_mut::<Health>() {
+            h.0 += 10;
+        }
+        assert_eq!(world.get::<Health>(id), Some(&Health(13)));
+    }
+}

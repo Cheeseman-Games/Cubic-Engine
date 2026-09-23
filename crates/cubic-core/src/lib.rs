@@ -1,17 +1,23 @@
-//! Minimal entity/component + input + render engine behind Cube-Combat.
+//! Minimal entity/component + input + render command core behind
+//! Cube-Combat.
 //!
-//! The engine is backend-agnostic: gameplay emits `DrawCommand`s into a
-//! `DrawList` each frame and backends (canvas, WebGPU, headless) flush it.
-//! Simulation is a fixed-tick pipeline of `System`s over a `World`.
+//! `cubic-core` is GPU-free and backend-agnostic: gameplay emits
+//! `DrawCommand`s into a `DrawList` each frame and backends
+//! (`cubic-render`'s canvas/WGPU flush) consume it. Simulation is a
+//! fixed-tick pipeline of `System`s over a `World`.
+//!
+//! The `rendering` feature (on by default) provides the render command
+//! model; disable it (`--no-default-features`) for a headless,
+//! dependency-free sim core.
 
-#[cfg(all(target_arch = "wasm32", feature = "web"))]
-pub mod canvas;
 pub mod input;
 pub mod math;
+#[cfg(feature = "rendering")]
 pub mod render;
 pub mod world;
 
 use crate::input::{FrameInput, InputState};
+#[cfg(feature = "rendering")]
 use crate::render::Renderer;
 use crate::world::World;
 
@@ -33,6 +39,7 @@ pub trait System {
 
 /// Convenience tuple for platforms that run one `Camera`-less fixed loop.
 /// `simulate` advances the short-lived gameplay systems; `render` draws.
+#[cfg(feature = "rendering")]
 pub trait GameDriver {
     fn simulate(&mut self, dt: f32, input: &InputState, frame: &FrameInput);
     fn draw(&self, renderer: &mut dyn Renderer);

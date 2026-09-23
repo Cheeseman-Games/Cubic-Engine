@@ -76,8 +76,13 @@ impl Renderer for DrawList {
     }
 
     fn text(&mut self, text: &str, x: f32, y: f32, size: f32, color: Rgba) {
-        self.commands
-            .push(DrawCommand::Text { text: Cow::Owned(text.to_owned()), x, y, size, color });
+        self.commands.push(DrawCommand::Text {
+            text: Cow::Owned(text.to_owned()),
+            x,
+            y,
+            size,
+            color,
+        });
     }
 }
 
@@ -86,4 +91,51 @@ pub struct NullRenderer;
 
 impl NullRenderer {
     pub fn render(&mut self, _list: &DrawList) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn draw_list_resets_between_frames() {
+        let mut list = DrawList::new();
+        list.clear(Rgba::rgb(0.1, 0.2, 0.3));
+        list.fill_rect(1.0, 2.0, 3.0, 4.0, Rgba::new(1.0, 0.0, 0.0, 0.5));
+        assert_eq!(list.commands.len(), 2);
+
+        list.reset();
+        assert!(list.commands.is_empty());
+    }
+
+    #[test]
+    fn renderer_captures_commands_in_order() {
+        let mut list = DrawList::new();
+        list.clear(Rgba::rgb(0.0, 0.0, 0.0));
+        list.fill_rect(0.0, 0.0, 1.0, 1.0, Rgba::rgb(1.0, 1.0, 1.0));
+        list.text("hi", 8.0, 9.0, 12.0, Rgba::rgb(0.5, 0.5, 0.5));
+
+        match &list.commands[..] {
+            [
+                DrawCommand::Clear(_),
+                DrawCommand::Rect { x, y, w, h, .. },
+                DrawCommand::Text { text, size, .. },
+            ] => {
+                assert_eq!(*x, 0.0);
+                assert_eq!(*y, 0.0);
+                assert_eq!(*w, 1.0);
+                assert_eq!(*h, 1.0);
+                assert_eq!(text, "hi");
+                assert_eq!(*size, 12.0);
+            }
+            _ => panic!("unexpected command sequence"),
+        }
+    }
+
+    #[test]
+    fn null_renderer_swallows_any_list() {
+        let mut list = DrawList::new();
+        list.fill_rect(0.0, 0.0, 1.0, 1.0, Rgba::rgb(1.0, 1.0, 1.0));
+        NullRenderer.render(&list);
+    }
 }
