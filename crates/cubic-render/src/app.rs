@@ -9,12 +9,14 @@
 
 use std::time::{Duration, Instant};
 
-use cubic_core::render::Rgba;
+use cubic_core::render::{DrawList, Rgba};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
+
+use crate::render2d::{QuadBatch, WgpuRenderer2d};
 
 /// Window creation parameters for [`Application::run`].
 #[derive(Clone, Debug)]
@@ -42,10 +44,17 @@ impl Default for WindowConfig {
 /// a fixed-tick accumulator) without games changing shape.
 pub trait AppDelegate {
     /// Advance game state by `dt` wall-clock seconds. Called once per
-    /// presented frame, immediately before the frame is cleared.
+    /// presented frame, immediately before the frame is drawn.
     fn update(&mut self, _dt: f32) {}
 
-    /// Backbuffer fill color for the frame that is about to be presented.
+    /// Emit the frame's draw commands into `list`. Called once per presented
+    /// frame after `update`. The shell resets the list before every call, so
+    /// the delegate only ever pushes — `DrawList` (`cubic_core`) is the
+    /// backend-agnostic boundary. The default emits nothing (just the clear).
+    fn draw(&mut self, _list: &mut DrawList) {}
+
+    /// Backbuffer fill color for frames whose `draw` pushed no `Clear`
+    /// command of its own.
     fn clear_color(&self) -> Rgba;
 }
 
@@ -95,6 +104,8 @@ pub struct Application {
     queue: Option<wgpu::Queue>,
     surface: Option<wgpu::Surface<'static>>,
     surface_format: Option<wgpu::TextureFormat>,
+    renderer: Option<WgpuRenderer2d>,
+    frame_list: DrawList,
     size: PhysicalSize<u32>,
     last_frame: Option<Instant>,
     fps_window_start: Option<Instant>,
@@ -111,6 +122,8 @@ impl Application {
             queue: None,
             surface: None,
             surface_format: None,
+            renderer: None,
+            frame_list: DrawList::new(),
             size: PhysicalSize::new(0, 0),
             last_frame: None,
             fps_window_start: None,
@@ -177,6 +190,9 @@ impl Application {
         self.last_frame = Some(now);
         delegate.update(dt);
 
+        self.frame_list.reset();
+        delegate.draw(&mut self.frame_list);
+
         let surface_texture = match self.acquire_frame() {
             Some(texture) => texture,
             None => return,
@@ -192,39 +208,18 @@ impl Application {
                 ..Default::default()
             });
 
-        let clear = delegate.clear_color();
-        let mut encoder = self
-            .device
-            .as_ref()
-            .expect("device initialized")
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("present-clear"),
-            });
-        {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: clear.r as f64,
-                            g: clear.g as f64,
-                            b: clear.b as f64,
-                            a: clear.a as f64,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        }
-
+        let device = self.device.as_ref().expect("device initialized");
         let queue = self.queue.as_ref().expect("queue initialized");
+        let renderer = self.renderer.as_mut().expect("renderer initialized");
+
+        let size = [self.size.width as f32, self.size.height as f32];
+        let batch = QuadBatch::from_list(&self.frame_list, size, delegate.clear_color());
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("cubic-2d present"),
+        });
+        renderer.render(device, queue, &mut encoder, &view, &batch);
+
         queue.submit([encoder.finish()]);
         self.window().pre_present_notify();
         queue.present(surface_texture);
@@ -334,12 +329,16 @@ impl<H: AppDelegate> Runner<H> {
             adapter.get_info().backend
         );
 
+        let render_format = surface_format.add_srgb_suffix();
+        let renderer = WgpuRenderer2d::new(&device, render_format);
+
         self.app.window = Some(window);
         self.app.instance = Some(instance);
         self.app.device = Some(device);
         self.app.queue = Some(queue);
         self.app.surface = Some(surface);
         self.app.surface_format = Some(surface_format);
+        self.app.renderer = Some(renderer);
         self.app.size = size;
         self.app.configure_surface();
         self.app.request_redraw();

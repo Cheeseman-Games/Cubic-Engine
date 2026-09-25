@@ -392,6 +392,7 @@ version = "0.1.0"
 name = "cubic-render"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "cubic-core",
  "env_logger",
  "js-sys",

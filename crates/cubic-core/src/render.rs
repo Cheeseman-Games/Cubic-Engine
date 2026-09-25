@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 /// RGBA color, components normalized to 0.0..=1.0.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rgba {
     pub r: f32,
     pub g: f32,
