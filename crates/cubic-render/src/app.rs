@@ -17,6 +17,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 use crate::render2d::{QuadBatch, WgpuRenderer2d};
+use crate::text::TextPipeline;
 
 /// Window creation parameters for [`Application::run`].
 #[derive(Clone, Debug)]
@@ -105,6 +106,9 @@ pub struct Application {
     surface: Option<wgpu::Surface<'static>>,
     surface_format: Option<wgpu::TextureFormat>,
     renderer: Option<WgpuRenderer2d>,
+    /// Built on the first frame that draws text: loading the system font
+    /// database costs more than a frame, so text-free frames skip it.
+    text: Option<TextPipeline>,
     frame_list: DrawList,
     size: PhysicalSize<u32>,
     last_frame: Option<Instant>,
@@ -123,6 +127,7 @@ impl Application {
             surface: None,
             surface_format: None,
             renderer: None,
+            text: None,
             frame_list: DrawList::new(),
             size: PhysicalSize::new(0, 0),
             last_frame: None,
@@ -215,12 +220,38 @@ impl Application {
         let size = [self.size.width as f32, self.size.height as f32];
         let batch = QuadBatch::from_list(&self.frame_list, size, delegate.clear_color());
 
+        if self.text.is_none() && !batch.texts.is_empty() {
+            let format = self
+                .surface_format
+                .expect("surface format set")
+                .add_srgb_suffix();
+            let mut text = TextPipeline::new(device, queue, format);
+            text.set_resolution(queue, self.size.width.max(1), self.size.height.max(1));
+            self.text = Some(text);
+        } else if let Some(text) = self.text.as_mut() {
+            text.set_resolution(queue, self.size.width.max(1), self.size.height.max(1));
+        }
+
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("cubic-2d present"),
         });
-        renderer.render(device, queue, &mut encoder, &view, &batch);
+        if let Err(error) = renderer.render(
+            device,
+            queue,
+            &mut encoder,
+            &view,
+            &batch,
+            self.text.as_mut(),
+        ) {
+            // The pass is dropped uncalled, so the frame still presents with
+            // the clear color instead of stalling the loop.
+            log::error!("drawing text failed: {error}");
+        }
 
         queue.submit([encoder.finish()]);
+        if let Some(text) = self.text.as_mut() {
+            text.trim();
+        }
         self.window().pre_present_notify();
         queue.present(surface_texture);
 

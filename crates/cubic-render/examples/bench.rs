@@ -34,7 +34,8 @@ fn main() {
 
     let wgpu_samples = sample(ITERS, || {
         let batch = QuadBatch::from_list(&list, size, Rgba::rgb(0.0, 0.0, 0.0));
-        std::hint::black_box(&batch.instances.len());
+        std::hint::black_box(&batch.rects.len());
+        std::hint::black_box(&batch.runs.len());
         std::hint::black_box(batch.clear);
     });
 

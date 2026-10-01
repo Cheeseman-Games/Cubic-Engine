@@ -2,23 +2,25 @@
 //!
 //! [`WgpuRenderer2d`] flushes a `cubic_core::render::DrawList` — the same
 //! command model the wasm canvas and headless backends consume — into GPU
-//! memory. Every `DrawCommand::Rect` becomes one instanced quad, all batched
-//! into a single indexed draw call, so gameplay code stays backend-agnostic:
-//! games emit commands into a `DrawList` and the flush target is invisible to
-//! them.
+//! memory. Every `DrawCommand::Rect` becomes one instanced quad and every
+//! `DrawCommand::Text` becomes one run of glyph quads (see [`crate::text`]), so
+//! gameplay code stays backend-agnostic: games emit commands into a `DrawList`
+//! and the flush target is invisible to them.
 //!
-//! [`QuadBatch`] is the CPU-side translation of a `DrawList` into instance
-//! data (plus the load-op clear color). It is written to be unit-testable
-//! without a GPU device; only [`WgpuRenderer2d::render`] talks to wgpu.
+//! [`QuadBatch`] is the CPU-side translation of a `DrawList` into instance data
+//! (plus the load-op clear color). It is written to be unit-testable without a
+//! GPU device; only [`WgpuRenderer2d::render`] talks to wgpu.
 //!
-//! `DrawCommand::Text` is intentionally skipped here (the glyph-atlas text
-//! pipeline is a separate milestone): text commands simply do not produce
-//! quads in this pass.
+//! Draw order is preserved: contiguous rects collapse into a single instanced
+//! draw call and a text command splits the rect stream, so a rect emitted after
+//! a label still paints over it — exactly as the canvas backend does.
 
 use std::borrow::Cow;
 
 use cubic_core::render::{DrawCommand, DrawList, Rgba};
 use wgpu::util::DeviceExt;
+
+use crate::text::{TextError, TextPipeline, TextSpan};
 
 /// Unit-quad corners in local space, 0..=1, wound counter-clockwise.
 pub const UNIT_QUAD: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
@@ -43,39 +45,62 @@ fn into_array(color: Rgba) -> [f32; 4] {
     [color.r, color.g, color.b, color.a]
 }
 
-/// The CPU translation of a `DrawList` into one batch of instanced quads.
+/// Which stream a [`BatchRun`] draws from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BatchKind {
+    Rects,
+    Text,
+}
+
+/// A contiguous span of one stream, emitted as its own draw call.
+///
+/// Runs appear in `DrawList` order and alternate: consecutive rects share a run
+/// (one instanced draw), while text splits them — so what lands on screen is
+/// painter's order, the order the commands were pushed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BatchRun {
+    pub kind: BatchKind,
+    /// First element of the run, indexed into `rects` or `texts` per `kind`.
+    pub start: usize,
+    pub len: usize,
+}
+
+/// The CPU translation of a `DrawList` into quads plus glyph runs.
 ///
 /// Clear semantics mirror the canvas backend: the *first* `Clear` becomes the
 /// render pass load-op color (and wipes everything drawn before it), any later
 /// `Clear` becomes a full-screen rect instance that repaints over prior quads.
 #[derive(Clone, Debug, PartialEq)]
-pub struct QuadBatch {
+pub struct QuadBatch<'a> {
     /// Color to clear the backbuffer with for this frame.
     pub clear: Rgba,
     /// Screen size in physical pixels.
     pub size: [f32; 2],
-    /// Instances: one per `Rect`, plus full-screen rects for extra `Clear`s.
-    pub instances: Vec<RectInstance>,
+    /// One instance per `Rect`, plus full-screen rects for extra `Clear`s.
+    pub rects: Vec<RectInstance>,
+    /// The frame's `Text` commands, borrowed from the `DrawList`.
+    pub texts: Vec<TextSpan<'a>>,
+    /// How to interleave [`rects`](Self::rects) and [`texts`](Self::texts).
+    pub runs: Vec<BatchRun>,
 }
 
-impl QuadBatch {
+impl<'a> QuadBatch<'a> {
     /// Build a batch from a frame's commands.
     ///
     /// `default_clear` is used when the list carries no `Clear` of its own — in
     /// the app shell that is the delegate's backbuffer color.
-    pub fn from_list(list: &DrawList, size: [f32; 2], default_clear: Rgba) -> Self {
+    pub fn from_list(list: &'a DrawList, size: [f32; 2], default_clear: Rgba) -> Self {
         let mut clear = default_clear;
         let mut clearing = false;
-        let mut instances = Vec::with_capacity(list.commands.len());
+        let mut rects = Vec::with_capacity(list.commands.len());
+        let mut texts = Vec::new();
+        let mut runs = Vec::new();
         for command in &list.commands {
             match command {
                 DrawCommand::Clear(color) => {
                     if clearing {
                         // A later Clear repaints the whole screen over prior quads.
-                        instances.push(RectInstance {
-                            rect: [0.0, 0.0, size[0], size[1]],
-                            color: into_array(*color),
-                        });
+                        push_rect(&mut rects, &mut runs, [0.0, 0.0, size[0], size[1]], *color);
                     } else {
                         clear = *color;
                         clearing = true;
@@ -83,24 +108,63 @@ impl QuadBatch {
                 }
                 DrawCommand::Rect { x, y, w, h, color } => {
                     if clearing {
-                        instances.push(RectInstance {
-                            rect: [*x, *y, *w, *h],
-                            color: into_array(*color),
-                        });
+                        push_rect(&mut rects, &mut runs, [*x, *y, *w, *h], *color);
                     }
                 }
-                DrawCommand::Text { .. } => {}
+                DrawCommand::Text {
+                    text,
+                    x,
+                    y,
+                    size,
+                    color,
+                } => {
+                    if clearing {
+                        let index = texts.len();
+                        texts.push(TextSpan {
+                            text,
+                            x: *x,
+                            y: *y,
+                            size: *size,
+                            color: *color,
+                        });
+                        extend_run(&mut runs, BatchKind::Text, index);
+                    }
+                }
             }
         }
         Self {
             clear,
             size,
-            instances,
+            rects,
+            texts,
+            runs,
         }
     }
 }
 
-/// The wgpu 2D backend: clear + instanced quads in a single pass.
+/// Append a rect instance, opening a new rect run when the last item was text.
+fn push_rect(rects: &mut Vec<RectInstance>, runs: &mut Vec<BatchRun>, rect: [f32; 4], color: Rgba) {
+    let index = rects.len();
+    rects.push(RectInstance {
+        rect,
+        color: into_array(color),
+    });
+    extend_run(runs, BatchKind::Rects, index);
+}
+
+/// Grow the run that is still open, or start one when the stream just changed.
+fn extend_run(runs: &mut Vec<BatchRun>, kind: BatchKind, index: usize) {
+    match runs.last_mut() {
+        Some(open) if open.kind == kind => open.len = index + 1 - open.start,
+        _ => runs.push(BatchRun {
+            kind,
+            start: index,
+            len: 1,
+        }),
+    }
+}
+
+/// The wgpu 2D backend: clear, instanced quads and glyphs in a single pass.
 pub struct WgpuRenderer2d {
     pipeline: wgpu::RenderPipeline,
     unit_quad: wgpu::Buffer,
@@ -262,28 +326,30 @@ impl WgpuRenderer2d {
     }
 
     /// Upload the batch and draw it into `view`.
+    ///
+    /// `text` is the glyph-atlas pipeline the batch's text runs are drawn with.
+    /// It is fed per run, so the recorded order — rects and text alike — is the
+    /// order the frame's commands were pushed in. `None` draws a batch with no
+    /// text in it, which is what a caller that has not built a [`TextPipeline`]
+    /// yet has while its first text-free frames go by.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        batch: &QuadBatch,
-    ) {
+        batch: &QuadBatch<'_>,
+        text: Option<&mut TextPipeline>,
+    ) -> Result<(), TextError> {
         queue.write_buffer(
             &self.uniform_buffer,
             0,
             bytemuck::bytes_of(&[batch.size[0], batch.size[1], 0.0, 0.0]),
         );
 
-        let instance_count = batch.instances.len();
-        if instance_count > 0 {
-            self.ensure_instance_capacity(device, instance_count);
-            queue.write_buffer(
-                &self.instance_buffer,
-                0,
-                bytemuck::cast_slice(&batch.instances),
-            );
+        if !batch.rects.is_empty() {
+            self.ensure_instance_capacity(device, batch.rects.len());
+            queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&batch.rects));
         }
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -308,19 +374,55 @@ impl WgpuRenderer2d {
             multiview_mask: None,
         });
 
-        if instance_count > 0 {
-            let bytes = (instance_count * size_of::<RectInstance>()) as wgpu::BufferAddress;
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_index_buffer(self.unit_quad_indices.slice(..), wgpu::IndexFormat::Uint16);
-            pass.set_vertex_buffer(0, self.unit_quad.slice(..));
-            pass.set_vertex_buffer(1, self.instance_buffer.slice(..bytes));
-            pass.draw_indexed(
-                0..UNIT_QUAD_INDICES.len() as u32,
-                0,
-                0..instance_count as u32,
+        let Some(text) = text else {
+            debug_assert!(
+                batch.texts.is_empty(),
+                "text batch drawn without a text pipeline"
             );
+            for run in &batch.runs {
+                if matches!(run.kind, BatchKind::Rects) {
+                    self.draw_rect_run(&mut pass, run);
+                }
+            }
+            return Ok(());
+        };
+
+        // Glyphon reallocates its atlas and vertex buffer when a frame needs more
+        // room than it has, which would invalidate draws already recorded into
+        // this pass — so the frame's whole text budget is reserved up front.
+        text.prepare_frame(device, queue, &batch.texts)?;
+
+        for run in &batch.runs {
+            match run.kind {
+                BatchKind::Rects => self.draw_rect_run(&mut pass, run),
+                BatchKind::Text => {
+                    let start = run.start;
+                    let end = start + run.len;
+                    text.draw(device, queue, &mut pass, start, &batch.texts[start..end])?;
+                }
+            }
         }
+
+        Ok(())
+    }
+
+    /// Draw one run of rect instances as a single indexed instanced call.
+    fn draw_rect_run<'r>(&self, pass: &mut wgpu::RenderPass<'r>, run: &BatchRun) {
+        if run.len == 0 {
+            return;
+        }
+        let first = run.start * size_of::<RectInstance>();
+        let bytes = run.len * size_of::<RectInstance>();
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_index_buffer(self.unit_quad_indices.slice(..), wgpu::IndexFormat::Uint16);
+        pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+        pass.set_vertex_buffer(
+            1,
+            self.instance_buffer
+                .slice(first as u64..(first + bytes) as u64),
+        );
+        pass.draw_indexed(0..UNIT_QUAD_INDICES.len() as u32, 0, 0..run.len as u32);
     }
 
     /// Grow the instance buffer (power-of-two) so it always holds `needed`
@@ -348,8 +450,8 @@ mod tests {
     use super::*;
     use cubic_core::render::Renderer;
 
-    fn list_with(default_clear: Rgba, size: [f32; 2]) -> QuadBatch {
-        QuadBatch::from_list(&DrawList::new(), size, default_clear)
+    fn run(kind: BatchKind, start: usize, len: usize) -> BatchRun {
+        BatchRun { kind, start, len }
     }
 
     #[test]
@@ -366,9 +468,11 @@ mod tests {
 
     #[test]
     fn empty_list_uses_default_clear() {
-        let batch = list_with(Rgba::rgb(0.1, 0.2, 0.3), [800.0, 600.0]);
+        let list = DrawList::new();
+        let batch = QuadBatch::from_list(&list, [800.0, 600.0], Rgba::rgb(0.1, 0.2, 0.3));
         assert_eq!(batch.clear, Rgba::rgb(0.1, 0.2, 0.3));
-        assert!(batch.instances.is_empty());
+        assert!(batch.rects.is_empty());
+        assert!(batch.runs.is_empty());
     }
 
     #[test]
@@ -378,7 +482,7 @@ mod tests {
 
         let batch = QuadBatch::from_list(&list, [800.0, 600.0], Rgba::rgb(0.0, 0.0, 0.0));
         assert_eq!(batch.clear, Rgba::rgb(1.0, 0.0, 0.0));
-        assert!(batch.instances.is_empty());
+        assert!(batch.rects.is_empty());
     }
 
     #[test]
@@ -389,15 +493,15 @@ mod tests {
         list.fill_rect(5.0, 6.0, 7.0, 8.0, Rgba::new(0.0, 1.0, 0.0, 1.0));
 
         let batch = QuadBatch::from_list(&list, [800.0, 600.0], Rgba::rgb(0.0, 0.0, 0.0));
-        assert_eq!(batch.instances.len(), 2);
+        assert_eq!(batch.rects.len(), 2);
         assert_eq!(
-            batch.instances[0].rect,
+            batch.rects[0].rect,
             [1.0, 2.0, 3.0, 4.0],
             "x,y,w,h must round-trip into the instance"
         );
-        assert_eq!(batch.instances[0].color, [1.0, 0.0, 0.0, 0.5]);
-        assert_eq!(batch.instances[1].rect, [5.0, 6.0, 7.0, 8.0]);
-        assert_eq!(batch.instances[1].color, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(batch.rects[0].color, [1.0, 0.0, 0.0, 0.5]);
+        assert_eq!(batch.rects[1].rect, [5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(batch.rects[1].color, [0.0, 1.0, 0.0, 1.0]);
     }
 
     #[test]
@@ -411,8 +515,8 @@ mod tests {
 
         let batch = QuadBatch::from_list(&list, [800.0, 600.0], Rgba::rgb(0.0, 0.0, 0.0));
         assert_eq!(batch.clear, Rgba::rgb(0.2, 0.2, 0.2));
-        assert_eq!(batch.instances.len(), 1, "pre-clear rect is dropped");
-        assert_eq!(batch.instances[0].rect, [20.0, 20.0, 5.0, 5.0]);
+        assert_eq!(batch.rects.len(), 1, "pre-clear rect is dropped");
+        assert_eq!(batch.rects[0].rect, [20.0, 20.0, 5.0, 5.0]);
     }
 
     #[test]
@@ -424,22 +528,119 @@ mod tests {
 
         let batch = QuadBatch::from_list(&list, [800.0, 600.0], Rgba::rgb(0.0, 0.0, 0.0));
         assert_eq!(batch.clear, Rgba::rgb(0.1, 0.1, 0.1));
-        assert_eq!(batch.instances.len(), 2);
+        assert_eq!(batch.rects.len(), 2);
         // The trailing Clear must cover the whole screen in its own color.
-        assert_eq!(batch.instances[1].rect, [0.0, 0.0, 800.0, 600.0]);
-        assert_eq!(batch.instances[1].color, [0.9, 0.9, 0.9, 1.0]);
+        assert_eq!(batch.rects[1].rect, [0.0, 0.0, 800.0, 600.0]);
+        assert_eq!(batch.rects[1].color, [0.9, 0.9, 0.9, 1.0]);
     }
 
     #[test]
-    fn text_commands_produce_no_quads() {
+    fn text_commands_go_to_the_glyph_stream() {
         let mut list = DrawList::new();
         list.clear(Rgba::rgb(0.0, 0.0, 0.0));
-        list.text("hello", 4.0, 4.0, 12.0, Rgba::rgb(1.0, 1.0, 1.0));
-        list.fill_rect(1.0, 1.0, 2.0, 2.0, Rgba::rgb(0.5, 0.5, 0.5));
+        list.text("hello", 4.0, 6.0, 12.0, Rgba::new(1.0, 0.5, 0.0, 0.25));
 
         let batch = QuadBatch::from_list(&list, [800.0, 600.0], Rgba::rgb(0.0, 0.0, 0.0));
-        assert_eq!(batch.instances.len(), 1);
-        assert_eq!(batch.instances[0].rect, [1.0, 1.0, 2.0, 2.0]);
+        assert!(batch.rects.is_empty(), "text is not a quad");
+        assert_eq!(
+            batch.texts,
+            vec![TextSpan {
+                text: "hello",
+                x: 4.0,
+                y: 6.0,
+                size: 12.0,
+                color: Rgba::new(1.0, 0.5, 0.0, 0.25),
+            }]
+        );
+    }
+
+    #[test]
+    fn text_before_the_first_clear_is_wiped() {
+        let mut list = DrawList::new();
+        list.text("gone", 0.0, 0.0, 12.0, Rgba::rgb(1.0, 1.0, 1.0));
+        list.clear(Rgba::rgb(0.0, 0.0, 0.0));
+
+        let batch = QuadBatch::from_list(&list, [800.0, 600.0], Rgba::rgb(1.0, 0.0, 0.0));
+        assert!(batch.texts.is_empty());
+        assert!(batch.runs.is_empty());
+    }
+
+    #[test]
+    fn contiguous_rects_share_one_run() {
+        let mut list = DrawList::new();
+        list.clear(Rgba::rgb(0.0, 0.0, 0.0));
+        for i in 0..5 {
+            list.fill_rect(i as f32, 0.0, 1.0, 1.0, Rgba::rgb(1.0, 1.0, 1.0));
+        }
+
+        let batch = QuadBatch::from_list(&list, [800.0, 600.0], Rgba::rgb(0.0, 0.0, 0.0));
+        assert_eq!(batch.runs, vec![run(BatchKind::Rects, 0, 5)]);
+    }
+
+    #[test]
+    fn runs_interleave_text_with_rects_in_command_order() {
+        let mut list = DrawList::new();
+        list.clear(Rgba::rgb(0.0, 0.0, 0.0));
+        list.fill_rect(0.0, 0.0, 1.0, 1.0, Rgba::rgb(1.0, 0.0, 0.0));
+        list.fill_rect(0.0, 0.0, 1.0, 1.0, Rgba::rgb(0.0, 1.0, 0.0));
+        list.text("a", 0.0, 0.0, 12.0, Rgba::rgb(1.0, 1.0, 1.0));
+        list.text("b", 0.0, 0.0, 12.0, Rgba::rgb(1.0, 1.0, 1.0));
+        list.fill_rect(0.0, 0.0, 1.0, 1.0, Rgba::rgb(0.0, 0.0, 1.0));
+
+        let batch = QuadBatch::from_list(&list, [800.0, 600.0], Rgba::rgb(0.0, 0.0, 0.0));
+        assert_eq!(batch.rects.len(), 3);
+        assert_eq!(batch.texts.len(), 2);
+        // Rects, then the adjacent labels in one run, then the rect that has to
+        // paint over them.
+        assert_eq!(
+            batch.runs,
+            vec![
+                run(BatchKind::Rects, 0, 2),
+                run(BatchKind::Text, 0, 2),
+                run(BatchKind::Rects, 2, 1),
+            ]
+        );
+        assert_eq!(batch.rects[2].color, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn runs_cover_every_item_exactly_once() {
+        let mut list = DrawList::new();
+        list.clear(Rgba::rgb(0.0, 0.0, 0.0));
+        for i in 0..20 {
+            match i % 3 {
+                0 => list.fill_rect(0.0, 0.0, 1.0, 1.0, Rgba::rgb(1.0, 1.0, 1.0)),
+                1 => list.text("x", 0.0, 0.0, 10.0, Rgba::rgb(1.0, 1.0, 1.0)),
+                _ => list.text("yy", 0.0, 0.0, 10.0, Rgba::rgb(1.0, 1.0, 1.0)),
+            }
+        }
+
+        let batch = QuadBatch::from_list(&list, [800.0, 600.0], Rgba::rgb(0.0, 0.0, 0.0));
+        let mut covered = vec![false; batch.rects.len()];
+        let mut labels = vec![false; batch.texts.len()];
+        let mut previous: Option<BatchKind> = None;
+        for run in &batch.runs {
+            if previous == Some(run.kind) {
+                panic!("runs of the same kind must merge");
+            }
+            previous = Some(run.kind);
+            match run.kind {
+                BatchKind::Rects => {
+                    for slot in &mut covered[run.start..run.start + run.len] {
+                        assert!(!*slot, "a rect is drawn twice");
+                        *slot = true;
+                    }
+                }
+                BatchKind::Text => {
+                    for slot in &mut labels[run.start..run.start + run.len] {
+                        assert!(!*slot, "a label is drawn twice");
+                        *slot = true;
+                    }
+                }
+            }
+        }
+        assert!(covered.iter().all(|slot| *slot), "every rect must be drawn");
+        assert!(labels.iter().all(|slot| *slot), "every label must be drawn");
     }
 
     #[test]
@@ -451,6 +652,7 @@ mod tests {
             list.fill_rect(i, i, 1.0, 1.0, Rgba::rgb(0.1, 0.2, 0.3));
         }
         let batch = QuadBatch::from_list(&list, [800.0, 600.0], Rgba::rgb(0.0, 0.0, 0.0));
-        assert_eq!(batch.instances.len(), 10_000, "one instance per rect");
+        assert_eq!(batch.rects.len(), 10_000, "one instance per rect");
+        assert_eq!(batch.runs, vec![run(BatchKind::Rects, 0, 10_000)]);
     }
 }
