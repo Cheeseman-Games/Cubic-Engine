@@ -5,6 +5,7 @@
 //!
 //! Run: `cargo run -p cubic-render --example basic`
 
+use cubic_core::input::{FrameInput, InputState};
 use cubic_core::render::Rgba;
 use cubic_render::app::{AppDelegate, Application, WindowConfig};
 
@@ -15,7 +16,7 @@ struct Cycle {
 }
 
 impl AppDelegate for Cycle {
-    fn update(&mut self, dt: f32) {
+    fn update(&mut self, dt: f32, _input: &InputState, _frame: &FrameInput) {
         self.t += dt;
     }
 

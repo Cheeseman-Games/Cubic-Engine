@@ -5,6 +5,8 @@
 //!
 //! - `app` (feature `wgpu`, desktop) — the winit + wgpu window/surface
 //!   shell.
+//! - `platform` — per-host input adapters: `platform::native` (winit,
+//!   desktop) and `platform::web` (DOM, wasm only).
 //! - `render2d` (feature `wgpu`, desktop) — the immediate-mode 2D renderer:
 //!   quad batching + color instancing over wgpu.
 //! - `text` (feature `wgpu`, desktop) — glyph-atlas text for the same command
@@ -15,6 +17,8 @@
 #[cfg(feature = "wgpu")]
 #[cfg(not(target_arch = "wasm32"))]
 pub mod app;
+
+pub mod platform;
 
 #[cfg(feature = "wgpu")]
 #[cfg(not(target_arch = "wasm32"))]

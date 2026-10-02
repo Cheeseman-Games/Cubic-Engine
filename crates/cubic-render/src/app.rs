@@ -9,6 +9,7 @@
 
 use std::time::{Duration, Instant};
 
+use cubic_core::input::{FrameInput, InputState};
 use cubic_core::render::{DrawList, Rgba};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -16,6 +17,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+use crate::platform::native::NativeInput;
 use crate::render2d::{QuadBatch, WgpuRenderer2d};
 use crate::text::TextPipeline;
 
@@ -44,9 +46,13 @@ impl Default for WindowConfig {
 /// Keeping the boundary a trait lets the runtime grow (a renderer hook, then
 /// a fixed-tick accumulator) without games changing shape.
 pub trait AppDelegate {
-    /// Advance game state by `dt` wall-clock seconds. Called once per
-    /// presented frame, immediately before the frame is drawn.
-    fn update(&mut self, _dt: f32) {}
+    /// Advance game state by `dt` wall-clock seconds. Called once per presented
+    /// frame, immediately before the frame is drawn.
+    ///
+    /// `input` carries held state and `frame` the edges for this frame only, the
+    /// same split `TickContext` uses, so a delegate's update step can move
+    /// straight into a `System` once the accumulator lands.
+    fn update(&mut self, dt: f32, input: &InputState, frame: &FrameInput);
 
     /// Emit the frame's draw commands into `list`. Called once per presented
     /// frame after `update`. The shell resets the list before every call, so
@@ -109,6 +115,11 @@ pub struct Application {
     /// Built on the first frame that draws text: loading the system font
     /// database costs more than a frame, so text-free frames skip it.
     text: Option<TextPipeline>,
+    /// Window events folded into engine input by the platform adapter.
+    input: NativeInput,
+    /// This frame's drained edges, kept alive because `update` borrows it
+    /// alongside the delegate's own state.
+    frame: FrameInput,
     frame_list: DrawList,
     size: PhysicalSize<u32>,
     last_frame: Option<Instant>,
@@ -128,6 +139,8 @@ impl Application {
             surface_format: None,
             renderer: None,
             text: None,
+            input: NativeInput::new(),
+            frame: FrameInput::default(),
             frame_list: DrawList::new(),
             size: PhysicalSize::new(0, 0),
             last_frame: None,
@@ -193,7 +206,11 @@ impl Application {
             .map(|t| (now - t).as_secs_f32())
             .unwrap_or(1.0 / 60.0);
         self.last_frame = Some(now);
-        delegate.update(dt);
+
+        // Drain edges for the frame being presented. Held state stays in the
+        // adapter and is read through the borrow below.
+        self.frame = self.input.begin_frame();
+        delegate.update(dt, self.input.state(), &self.frame);
 
         self.frame_list.reset();
         delegate.draw(&mut self.frame_list);
@@ -394,6 +411,9 @@ impl<H: AppDelegate> ApplicationHandler for Runner<H> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Fold first: the adapter ignores anything it does not handle, so every
+        // event reaches input without this arm needing to enumerate them.
+        self.app.input.handle_event(&event);
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {

@@ -7,6 +7,7 @@
 //! Fonts come from the system font database. Set `CUBIC_FONT` to a font file (or
 //! a directory of them) to add to it — see `text::FONT_PATH_ENV` in the engine.
 
+use cubic_core::input::{FrameInput, InputState};
 use cubic_core::render::{DrawList, Renderer, Rgba};
 use cubic_render::app::{AppDelegate, Application, WindowConfig};
 
@@ -24,7 +25,7 @@ struct Scene {
 }
 
 impl AppDelegate for Scene {
-    fn update(&mut self, dt: f32) {
+    fn update(&mut self, dt: f32, _input: &InputState, _frame: &FrameInput) {
         self.t += dt;
         self.frames += 1;
     }

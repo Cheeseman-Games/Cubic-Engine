@@ -7,6 +7,7 @@
 //!
 //! Run: `cargo run -p cubic-render --example draw2d`
 
+use cubic_core::input::{FrameInput, InputState};
 use cubic_core::render::{DrawList, Renderer, Rgba};
 use cubic_render::app::{AppDelegate, Application, WindowConfig};
 
@@ -18,7 +19,7 @@ struct Scene {
 }
 
 impl AppDelegate for Scene {
-    fn update(&mut self, dt: f32) {
+    fn update(&mut self, dt: f32, _input: &InputState, _frame: &FrameInput) {
         self.t += dt;
     }
 

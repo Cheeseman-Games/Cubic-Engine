@@ -25,6 +25,14 @@ wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 web-sys = { version = "0.3", optional = true, features = [
     "CanvasRenderingContext2d",
+    "Document",
+    "Event",
+    "EventTarget",
+    "HtmlElement",
+    "KeyboardEvent",
+    "MouseEvent",
+    "WheelEvent",
+    "Window",
 ] }
 wgpu = { version = "30", optional = true }
 winit = { version = "0.30", optional = true }

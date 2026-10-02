@@ -10,12 +10,16 @@
 //! model; disable it (`--no-default-features`) for a headless,
 //! dependency-free sim core.
 
+pub mod components;
 pub mod input;
 pub mod math;
 #[cfg(feature = "rendering")]
 pub mod render;
 pub mod world;
 
+pub mod prelude;
+
+pub use crate::components::Transform;
 use crate::input::{FrameInput, InputState};
 #[cfg(feature = "rendering")]
 use crate::render::Renderer;
@@ -43,4 +47,16 @@ pub trait System {
 pub trait GameDriver {
     fn simulate(&mut self, dt: f32, input: &InputState, frame: &FrameInput);
     fn draw(&self, renderer: &mut dyn Renderer);
+}
+
+/// The game trait that the engine-hosted runtime calls into.
+#[cfg(feature = "rendering")]
+pub trait Game {
+    fn new() -> Self
+    where
+        Self: Sized;
+
+    fn update(&mut self, _dt: f32, _input: &InputState, _frame: &FrameInput) {}
+
+    fn draw(&mut self, _list: &mut crate::render::DrawList) {}
 }
