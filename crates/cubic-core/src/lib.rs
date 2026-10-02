@@ -9,6 +9,9 @@
 //! The `rendering` feature (on by default) provides the render command
 //! model; disable it (`--no-default-features`) for a headless,
 //! dependency-free sim core.
+//!
+//! Game crates import [`prelude`] (or `cubic_render::prelude`, which adds the
+//! runtime) rather than naming modules.
 
 pub mod components;
 pub mod input;
@@ -22,7 +25,7 @@ pub mod prelude;
 pub use crate::components::Transform;
 use crate::input::{FrameInput, InputState};
 #[cfg(feature = "rendering")]
-use crate::render::Renderer;
+use crate::render::Rgba;
 use crate::world::World;
 
 /// Everything a `System` may touch while running each tick.
@@ -41,22 +44,34 @@ pub trait System {
     fn run(&mut self, ctx: &mut TickContext<'_>);
 }
 
-/// Convenience tuple for platforms that run one `Camera`-less fixed loop.
-/// `simulate` advances the short-lived gameplay systems; `render` draws.
-#[cfg(feature = "rendering")]
-pub trait GameDriver {
-    fn simulate(&mut self, dt: f32, input: &InputState, frame: &FrameInput);
-    fn draw(&self, renderer: &mut dyn Renderer);
-}
-
-/// The game trait that the engine-hosted runtime calls into.
+/// The game trait the engine-hosted runtime calls into.
+///
+/// A game crate implements this once and hands an instance to whatever hosts
+/// it — `engine_main!` on the desktop, a platform runner on wasm. It is the
+/// whole host-facing surface: constructing the value is the setup step,
+/// `update` advances the simulation, `draw` emits the frame's commands. Hosts
+/// own the window, the loop and the GPU, so game code never touches platform
+/// APIs.
+///
+/// Every method has a default, so the smallest legal game is just `impl Game
+/// for MyGame {}`.
 #[cfg(feature = "rendering")]
 pub trait Game {
-    fn new() -> Self
-    where
-        Self: Sized;
-
+    /// Advance the simulation by `dt` seconds.
+    ///
+    /// `input` carries held state, `frame` this tick's edges — the same split
+    /// `TickContext` gives a `System`, so an update body can drop straight
+    /// into one.
     fn update(&mut self, _dt: f32, _input: &InputState, _frame: &FrameInput) {}
 
+    /// Emit this frame's draw commands. The host resets the list before every
+    /// call, so implementations only ever push.
     fn draw(&mut self, _list: &mut crate::render::DrawList) {}
+
+    /// Backbuffer fill for frames whose `draw` pushed no `Clear` of its own.
+    ///
+    /// Black by default: a game that wants another backdrop clears explicitly.
+    fn clear_color(&self) -> Rgba {
+        Rgba::rgb(0.0, 0.0, 0.0)
+    }
 }

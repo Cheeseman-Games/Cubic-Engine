@@ -1,14 +1,20 @@
 //! Desktop `winit` + `wgpu` application shell.
 //!
-//! [`Application`] is the seed of the runtime that `engine_main!` will later
-//! generate: it owns the window, the GPU device/queue and the present surface,
-//! and drives a continuous vsync-capped frame loop (so presentation matches
-//! the display refresh, typically 60 Hz). The game only hands over a
-//! [`WindowConfig`] and an [`AppDelegate`]; the delegate is called once per
-//! presented frame.
+//! [`Application`] is the runtime that [`engine_main!`] generates: it owns the
+//! window, the GPU device/queue and the present surface, and drives a
+//! continuous vsync-capped frame loop (so presentation matches the display
+//! refresh, typically 60 Hz). The game only hands over a [`WindowConfig`] and
+//! an [`AppDelegate`]; the delegate is called once per presented frame.
+//!
+//! Game crates do not write that plumbing. They implement
+//! [`cubic_core::Game`], and [`GameDelegate`] adapts it to [`AppDelegate`] —
+//! so `engine_main!(MyGame::new())` is the entire entry point of a game.
+//!
+//! [`engine_main!`]: crate::engine_main
 
 use std::time::{Duration, Instant};
 
+use cubic_core::Game;
 use cubic_core::input::{FrameInput, InputState};
 use cubic_core::render::{DrawList, Rgba};
 use winit::application::ApplicationHandler;
@@ -428,5 +434,245 @@ impl<H: AppDelegate> ApplicationHandler for Runner<H> {
             }
             _ => {}
         }
+    }
+}
+
+/// Adapts a [`Game`] to the shell's per-frame [`AppDelegate`] callbacks.
+///
+/// This is the whole bridge between a game and the window: the delegate owns no
+/// state beyond the game, so every frame is `Game::update` followed by
+/// `Game::draw`. Hosts that cannot use [`Application`] — an editor driving a
+/// game in-process, a test — can drive the `Game` directly instead; nothing in
+/// the loop requires this wrapper.
+pub struct GameDelegate<G> {
+    game: G,
+}
+
+impl<G: Game> GameDelegate<G> {
+    pub fn new(game: G) -> Self {
+        Self { game }
+    }
+
+    pub fn into_game(self) -> G {
+        self.game
+    }
+
+    pub fn game_mut(&mut self) -> &mut G {
+        &mut self.game
+    }
+}
+
+impl<G: Game> AppDelegate for GameDelegate<G> {
+    fn update(&mut self, dt: f32, input: &InputState, frame: &FrameInput) {
+        self.game.update(dt, input, frame);
+    }
+
+    fn draw(&mut self, list: &mut DrawList) {
+        self.game.draw(list);
+    }
+
+    fn clear_color(&self) -> Rgba {
+        self.game.clear_color()
+    }
+}
+
+/// Own a window and run `game` until it is closed.
+///
+/// The one function behind [`engine_main!`]. Logging is set up here so a game
+/// needs no `main` of its own; `RUST_LOG` still wins, and a game that already
+/// installed a logger keeps it.
+pub fn run_game<G: Game + 'static>(game: G, config: WindowConfig) -> Result<(), AppError> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .try_init();
+
+    // The game's own backdrop wins over the config's, so a `Game` that never
+    // clears still gets the color it asked for on frames that skip `draw`.
+    let config = WindowConfig {
+        clear_color: game.clear_color(),
+        ..config
+    };
+    Application::new(config).run(GameDelegate::new(game))
+}
+
+/// Write a game's entire `main`: window, loop, input pump and renderer, wired
+/// around a [`cubic_core::Game`] implementation.
+///
+/// ```ignore
+/// use cubic_render::prelude::*;
+///
+/// struct MyGame {
+///     t: f32,
+/// }
+///
+/// impl Game for MyGame {
+///     fn update(&mut self, dt: f32, _input: &InputState, _frame: &FrameInput) {
+///         self.t += dt;
+///     }
+///
+///     fn draw(&mut self, list: &mut DrawList) {
+///         list.clear(Rgba::rgb(0.1, 0.1, 0.1));
+///         list.fill_rect(10.0, 10.0, 100.0, 50.0, Rgba::rgb(1.0, 0.5, 0.2));
+///     }
+/// }
+///
+/// engine_main!(MyGame { t: 0.0 });
+/// ```
+///
+/// The argument is an expression that *produces* the game — so a constructor
+/// call, `MyGame::new()`, with any setup already applied. The window title
+/// defaults to the crate name; call [`run_game`] directly to override the
+/// title, size or backdrop.
+#[macro_export]
+macro_rules! engine_main {
+    ($ctor:expr $(,)?) => {
+        fn main() {
+            $crate::run_game(
+                $ctor,
+                $crate::WindowConfig {
+                    title: ::std::string::String::from(env!("CARGO_PKG_NAME")),
+                    ..::std::default::Default::default()
+                },
+            )
+            .expect("cubic: application ended early");
+        }
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cubic_core::input::KeyCode;
+    use cubic_core::render::{DrawCommand, Renderer};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// What the shell asked of a game, recorded behind an `Rc` so the
+    /// assertions can read it after the game has been handed over.
+    #[derive(Default)]
+    struct Probe {
+        dts: Vec<f32>,
+        backdrop: Option<Rgba>,
+    }
+
+    type Shared = Rc<RefCell<Probe>>;
+
+    struct ProbeGame(Shared);
+
+    impl Game for ProbeGame {
+        fn update(&mut self, dt: f32, _input: &InputState, _frame: &FrameInput) {
+            self.0.borrow_mut().dts.push(dt);
+        }
+
+        fn draw(&mut self, list: &mut DrawList) {
+            list.fill_rect(1.0, 2.0, 3.0, 4.0, Rgba::rgb(1.0, 0.0, 0.0));
+        }
+
+        fn clear_color(&self) -> Rgba {
+            self.0.borrow().backdrop.unwrap_or(Rgba::rgb(0.0, 0.0, 0.0))
+        }
+    }
+
+    /// Input carrying a single press, for tests that check edges arrive intact.
+    fn input_with(key: KeyCode) -> (InputState, FrameInput) {
+        let mut input = InputState::new();
+        input.key_down(key);
+        let frame = input.begin_frame();
+        (input, frame)
+    }
+
+    #[test]
+    fn update_is_forwarded_once_per_call_with_its_own_dt() {
+        let probe: Shared = Rc::new(RefCell::new(Probe::default()));
+        let mut delegate = GameDelegate::new(ProbeGame(Rc::clone(&probe)));
+        let (input, frame) = input_with(KeyCode::Space);
+
+        delegate.update(1.0 / 60.0, &input, &frame);
+        delegate.update(1.0 / 30.0, &input, &frame);
+
+        assert_eq!(probe.borrow().dts, vec![1.0 / 60.0, 1.0 / 30.0]);
+    }
+
+    #[test]
+    fn draw_commands_reach_the_list_untouched() {
+        let probe: Shared = Rc::new(RefCell::new(Probe::default()));
+        let mut delegate = GameDelegate::new(ProbeGame(probe));
+        let mut list = DrawList::new();
+
+        delegate.draw(&mut list);
+
+        assert!(matches!(
+            list.commands.as_slice(),
+            [DrawCommand::Rect {
+                x: 1.0,
+                y: 2.0,
+                w: 3.0,
+                h: 4.0,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn the_backdrop_comes_from_the_game() {
+        let probe: Shared = Rc::new(RefCell::new(Probe {
+            backdrop: Some(Rgba::rgb(0.1, 0.2, 0.3)),
+            ..Probe::default()
+        }));
+        let delegate = GameDelegate::new(ProbeGame(probe));
+        assert_eq!(delegate.clear_color(), Rgba::rgb(0.1, 0.2, 0.3));
+    }
+
+    /// A game that overrides nothing is still a valid game: the empty bodies
+    /// must be callable, and the backdrop must be black rather than leaking
+    /// whatever the window config happened to carry.
+    #[test]
+    fn an_empty_game_impl_is_legal_and_clears_black() {
+        struct Minimal;
+        impl Game for Minimal {}
+
+        let mut delegate = GameDelegate::new(Minimal);
+        assert_eq!(delegate.clear_color(), Rgba::rgb(0.0, 0.0, 0.0));
+
+        let mut list = DrawList::new();
+        delegate.update(0.016, &InputState::new(), &FrameInput::default());
+        delegate.draw(&mut list);
+        assert!(list.commands.is_empty());
+    }
+
+    #[test]
+    fn the_game_is_reachable_through_and_out_of_the_delegate() {
+        let probe: Shared = Rc::new(RefCell::new(Probe::default()));
+        let mut delegate = GameDelegate::new(ProbeGame(Rc::clone(&probe)));
+
+        delegate
+            .game_mut()
+            .update(0.5, &InputState::new(), &FrameInput::default());
+
+        let game = delegate.into_game();
+        assert_eq!(game.0.borrow().dts, vec![0.5]);
+    }
+
+    /// The delegate must not drain or re-time anything: a press the shell
+    /// collected is the press the game sees.
+    #[test]
+    fn frame_edges_arrive_at_the_game_unchanged() {
+        struct Waiter {
+            saw_escape: Rc<RefCell<bool>>,
+        }
+        impl Game for Waiter {
+            fn update(&mut self, _dt: f32, _input: &InputState, frame: &FrameInput) {
+                *self.saw_escape.borrow_mut() = frame.pressed(KeyCode::Escape);
+            }
+        }
+
+        let saw_escape = Rc::new(RefCell::new(false));
+        let mut delegate = GameDelegate::new(Waiter {
+            saw_escape: Rc::clone(&saw_escape),
+        });
+        let (input, frame) = input_with(KeyCode::Escape);
+
+        delegate.update(0.016, &input, &frame);
+
+        assert!(*saw_escape.borrow());
     }
 }
