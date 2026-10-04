@@ -29,6 +29,14 @@ pub use crate::{
     run_game_with_tick,
 };
 
+/// The project manifest — the `game.toml` a project is described by — plus the
+/// entry point that runs a game from one. Absent without the `manifest` feature.
+#[cfg(feature = "manifest")]
+pub use crate::manifest::{ManifestError, ProjectManifest};
+
+#[cfg(all(feature = "manifest", feature = "wgpu", not(target_arch = "wasm32")))]
+pub use crate::run_project;
+
 #[cfg(all(test, feature = "wgpu", not(target_arch = "wasm32")))]
 mod tests {
     use super::*;

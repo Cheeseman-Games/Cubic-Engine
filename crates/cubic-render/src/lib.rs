@@ -20,8 +20,15 @@
 //!
 //! A game crate imports [`prelude`] and writes one `Game` impl; it should never
 //! name `winit`, `wgpu` or `cubic_core` directly.
+//!
+//! With the `manifest` feature the [`manifest`] module is re-exported from
+//! `cubic_core`: that is the `game.toml` a project is described by, and
+//! [`run_project`] is the entry point that turns one into a running game.
 
 pub mod tick;
+
+#[cfg(feature = "manifest")]
+pub use cubic_core::manifest;
 
 #[cfg(feature = "wgpu")]
 #[cfg(not(target_arch = "wasm32"))]
@@ -52,3 +59,8 @@ pub use tick::{DEFAULT_TICK_HZ, FixedTick, MAX_FRAME_SECONDS};
 pub use app::{
     AppDelegate, AppError, EngineApp, GameDelegate, WindowConfig, run_game, run_game_with_tick,
 };
+
+#[cfg(feature = "manifest")]
+#[cfg(feature = "wgpu")]
+#[cfg(not(target_arch = "wasm32"))]
+pub use app::run_project;

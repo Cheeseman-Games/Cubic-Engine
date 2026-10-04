@@ -6,9 +6,14 @@ edition.workspace = true
 [features]
 default = ["rendering"]
 rendering = []
+# The `game.toml` project manifest: schema and parser. Off by default because a
+# game embeds its manifest and a headless sim has no window to describe.
+manifest = ["rendering", "dep:serde", "dep:toml"]
 
 [dependencies]
 glam = "0.30"
+serde = { version = "1", features = ["derive"], optional = true }
+toml = { version = "0.9", optional = true }
 
 [lints]
 workspace = true

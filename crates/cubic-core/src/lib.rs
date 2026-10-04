@@ -8,13 +8,16 @@
 //!
 //! The `rendering` feature (on by default) provides the render command
 //! model; disable it (`--no-default-features`) for a headless,
-//! dependency-free sim core.
+//! dependency-free sim core. The `manifest` feature adds the `game.toml`
+//! project manifest on top of it.
 //!
 //! Game crates import [`prelude`] (or `cubic_render::prelude`, which adds the
 //! runtime) rather than naming modules.
 
 pub mod components;
 pub mod input;
+#[cfg(feature = "manifest")]
+pub mod manifest;
 pub mod math;
 #[cfg(feature = "rendering")]
 pub mod render;

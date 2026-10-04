@@ -41,14 +41,19 @@ use winit::window::{Window, WindowId};
 use crate::platform::native::NativeInput;
 use crate::render2d::{QuadBatch, WgpuRenderer2d};
 use crate::text::TextPipeline;
-use crate::tick::FixedTick;
+use crate::tick::{FixedTick, MAX_FRAME_SECONDS};
 
 /// Window creation parameters for [`EngineApp::run`].
+///
+/// A project manifest is the usual source for one — see
+/// [`WindowConfig::from_manifest`] — but a host that has its settings from
+/// somewhere else (a test, a tool, a native window) can build it directly.
 #[derive(Clone, Debug)]
 pub struct WindowConfig {
     pub title: String,
     pub width: f64,
     pub height: f64,
+    pub resizable: bool,
     pub clear_color: Rgba,
 }
 
@@ -58,7 +63,25 @@ impl Default for WindowConfig {
             title: "cubic".to_string(),
             width: 960.0,
             height: 540.0,
+            resizable: true,
             clear_color: Rgba::rgb(0.07, 0.09, 0.13),
+        }
+    }
+}
+
+#[cfg(feature = "manifest")]
+impl WindowConfig {
+    /// The window a project manifest asks for.
+    ///
+    /// The manifest's logical pixel size becomes the window's initial inner
+    /// size; the window manager scales it if the display cannot show it at 1:1.
+    pub fn from_manifest(manifest: &cubic_core::manifest::ProjectManifest) -> Self {
+        Self {
+            title: manifest.window_title().to_string(),
+            width: f64::from(manifest.window.width),
+            height: f64::from(manifest.window.height),
+            resizable: manifest.window.resizable,
+            clear_color: manifest.window.clear_color,
         }
     }
 }
@@ -433,6 +456,7 @@ impl<H: AppDelegate> Runner<H> {
                 .create_window(
                     Window::default_attributes()
                         .with_title(self.app.config.title.clone())
+                        .with_resizable(self.app.config.resizable)
                         .with_inner_size(LogicalSize::new(
                             self.app.config.width,
                             self.app.config.height,
@@ -588,6 +612,38 @@ pub fn run_game_with_tick<G: Game + 'static>(
         ..config
     };
     EngineApp::with_tick(config, tick).run(GameDelegate::new(game))
+}
+
+/// The simulation clock a project manifest asks for.
+///
+/// Free-standing so the rate a manifest produces can be checked without opening
+/// a window, and so [`run_project`] reads as "run the game the manifest
+/// describes" rather than repeating the construction.
+#[cfg(feature = "manifest")]
+fn tick_for(manifest: &cubic_core::manifest::ProjectManifest) -> FixedTick {
+    // A manifest's rate is sanitized by `FixedTick::hz`, so a project that names
+    // a nonsense one runs at the default instead of failing to start.
+    FixedTick::hz(manifest.game.tick_hz, MAX_FRAME_SECONDS)
+}
+
+/// Run `game` in the window its project manifest describes, ticking at the rate
+/// the manifest names.
+///
+/// The whole of a project's entry point: a game that embeds its `game.toml`
+/// calls this and has a manifest-driven window and simulation clock, without
+/// naming a single field of [`WindowConfig`] or [`FixedTick`]. Everything else
+/// in the manifest (features, icon, version) is about building and shipping the
+/// project rather than running it.
+#[cfg(feature = "manifest")]
+pub fn run_project<G: Game + 'static>(
+    game: G,
+    manifest: &cubic_core::manifest::ProjectManifest,
+) -> Result<(), AppError> {
+    run_game_with_tick(
+        game,
+        WindowConfig::from_manifest(manifest),
+        tick_for(manifest),
+    )
 }
 
 /// Write a game's entire `main`: window, loop, fixed-tick clock, input pump and
@@ -880,5 +936,101 @@ mod tests {
         delegate.update(0.016, &input, &frame);
 
         assert!(*saw_escape.borrow());
+    }
+
+    /// The whole point of the manifest layer: what `game.toml` says is what the
+    /// window is, with no field copied by hand in between.
+    #[cfg(feature = "manifest")]
+    mod manifest_project {
+        use super::*;
+        use cubic_core::manifest::ProjectManifest;
+
+        /// Parse a manifest, panicking with the reason if it does not — the
+        /// shape a test wants to stay terse.
+        fn manifest(text: &str) -> ProjectManifest {
+            ProjectManifest::parse(text).expect("test manifest is valid")
+        }
+
+        #[test]
+        fn the_manifest_becomes_the_window_it_describes() {
+            let window = WindowConfig::from_manifest(&manifest(
+                r##"
+[game]
+name = "platformer"
+
+[window]
+title = "Platformer"
+width = 1280
+height = 720
+resizable = false
+clear_color = "#204060"
+"##,
+            ));
+
+            assert_eq!(window.title, "Platformer");
+            assert_eq!(window.width, 1280.0);
+            assert_eq!(window.height, 720.0);
+            assert!(!window.resizable);
+            assert!((window.clear_color.g - 64.0 / 255.0).abs() < 1e-6);
+        }
+
+        /// A project that names no title gets the one it is called, and a
+        /// project that names nothing else gets a window like any other.
+        #[test]
+        fn an_untitled_project_opens_a_titled_window() {
+            let window = WindowConfig::from_manifest(&manifest("[game]\nname = \"platformer\"\n"));
+
+            assert_eq!(window.title, "platformer");
+            assert!(window.resizable);
+            assert_eq!(window.width, WindowConfig::default().width);
+            assert_eq!(window.height, WindowConfig::default().height);
+        }
+
+        /// The manifest's defaults and the shell's defaults are two spellings of
+        /// one decision; they must not drift apart.
+        #[test]
+        fn the_manifest_and_the_shell_default_to_the_same_window() {
+            let default = WindowConfig::default();
+            let from_manifest =
+                WindowConfig::from_manifest(&manifest("[game]\nname = \"cubic\"\n"));
+
+            assert_eq!(from_manifest.width as u32, default.width as u32);
+            assert_eq!(from_manifest.height as u32, default.height as u32);
+            assert_eq!(from_manifest.resizable, default.resizable);
+            assert_eq!(from_manifest.clear_color, default.clear_color);
+        }
+
+        #[test]
+        fn the_manifest_rate_is_the_tick_rate() {
+            let tick = tick_for(&manifest("[game]\nname = \"demo\"\ntick_hz = 120\n"));
+            assert!(
+                (tick.rate() - 120.0).abs() < 1e-3,
+                "120 Hz manifest ran at {}",
+                tick.rate()
+            );
+            assert_eq!(tick.max_frame(), MAX_FRAME_SECONDS);
+        }
+
+        /// The contract `FixedTick` documents: a project that asks for an
+        /// impossible rate runs at the default rather than refusing to start.
+        #[test]
+        fn a_nonsense_manifest_rate_runs_at_the_default_rate() {
+            for bad in ["0", "-30", "1e40"] {
+                let tick = tick_for(&manifest(&format!(
+                    "[game]\nname = \"demo\"\ntick_hz = {bad}\n"
+                )));
+                assert!(
+                    (tick.rate() - crate::DEFAULT_TICK_HZ).abs() < 1e-3,
+                    "tick_hz = {bad} ran at {}",
+                    tick.rate()
+                );
+            }
+        }
+
+        #[test]
+        fn a_manifest_with_no_rate_ticks_at_the_documented_default() {
+            let tick = tick_for(&manifest("[game]\nname = \"demo\"\n"));
+            assert!((tick.rate() - crate::DEFAULT_TICK_HZ).abs() < 1e-3);
+        }
     }
 }

@@ -1,0 +1,12 @@
+[package]
+name = "cubic-cli"
+description = "Generate, build and run cubic game projects"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cubic-core = { path = "../cubic-core", features = ["manifest"] }
+toml = "0.9"
+
+[lints]
+workspace = true

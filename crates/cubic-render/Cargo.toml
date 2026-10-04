@@ -5,6 +5,7 @@ edition.workspace = true
 
 [features]
 default = ["wgpu"]
+manifest = ["cubic-core/manifest"]
 web = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys"]
 wgpu = [
     "dep:winit",
