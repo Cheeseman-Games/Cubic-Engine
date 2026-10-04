@@ -62,5 +62,9 @@ required-features = ["wgpu"]
 name = "hello"
 required-features = ["wgpu"]
 
+[[example]]
+name = "tick"
+required-features = ["wgpu"]
+
 [lints]
 workspace = true

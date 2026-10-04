@@ -15,12 +15,18 @@
 
 pub use cubic_core::prelude::*;
 
+/// The fixed-timestep clock the runtime advances gameplay by. A game rarely
+/// constructs one — [`engine_main!`] supplies a 60 Hz default — but the rate is
+/// part of the game-facing contract, so it is reachable from the same glob.
+pub use crate::tick::{DEFAULT_TICK_HZ, FixedTick, MAX_FRAME_SECONDS};
+
 /// The desktop runtime: the window shell a game is hosted in and the macro
 /// that generates its `main`. Absent without the `wgpu` feature, or on wasm.
 #[cfg(feature = "wgpu")]
 #[cfg(not(target_arch = "wasm32"))]
 pub use crate::{
-    AppDelegate, AppError, Application, GameDelegate, WindowConfig, engine_main, run_game,
+    AppDelegate, AppError, EngineApp, GameDelegate, WindowConfig, engine_main, run_game,
+    run_game_with_tick,
 };
 
 #[cfg(all(test, feature = "wgpu", not(target_arch = "wasm32")))]
@@ -41,6 +47,7 @@ mod tests {
 
     impl Game for Hello {
         fn update(&mut self, dt: f32, _input: &InputState, _frame: &FrameInput) {
+            // Always the fixed step, whatever the display is doing.
             self.t += dt;
         }
 
@@ -82,6 +89,15 @@ mod tests {
 
         let window = WindowConfig::default();
         assert_eq!(window.clear_color, Rgba::rgb(0.07, 0.09, 0.13));
+    }
+
+    /// The tick rate a game is handed is the documented default, and the type a
+    /// manifest-driven host overrides it with.
+    #[test]
+    fn the_prelude_names_the_runtime_tick_rate() {
+        assert_eq!(DEFAULT_TICK_HZ, 60.0);
+        assert_eq!(FixedTick::default().step(), 1.0 / 60.0);
+        assert_eq!(MAX_FRAME_SECONDS, 0.25);
     }
 
     #[test]

@@ -9,7 +9,7 @@
 
 use cubic_core::input::{FrameInput, InputState};
 use cubic_core::render::{DrawList, Renderer, Rgba};
-use cubic_render::app::{AppDelegate, Application, WindowConfig};
+use cubic_render::app::{AppDelegate, EngineApp, WindowConfig};
 
 const WIDTH: f32 = 960.0;
 const HEIGHT: f32 = 540.0;
@@ -77,7 +77,7 @@ fn main() {
         ..WindowConfig::default()
     };
 
-    Application::new(config)
+    EngineApp::new(config)
         .run(Scene { t: 0.0 })
-        .expect("application ended early");
+        .expect("runtime ended early");
 }

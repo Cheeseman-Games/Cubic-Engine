@@ -7,7 +7,7 @@
 
 use cubic_core::input::{FrameInput, InputState};
 use cubic_core::render::Rgba;
-use cubic_render::app::{AppDelegate, Application, WindowConfig};
+use cubic_render::app::{AppDelegate, EngineApp, WindowConfig};
 
 /// A modest demo state: it animates the clear color so the presentation loop
 /// is visibly running (and `dt` is provably being fed).
@@ -52,7 +52,7 @@ fn main() {
         ..WindowConfig::default()
     };
 
-    Application::new(config)
+    EngineApp::new(config)
         .run(Cycle { t: 0.0 })
-        .expect("application ended early");
+        .expect("runtime ended early");
 }

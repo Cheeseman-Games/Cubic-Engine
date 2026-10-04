@@ -5,6 +5,10 @@
 //! every game project starts at.
 //!
 //! Run: `cargo run -p cubic-render --example hello`
+//!
+//! `update` is a fixed step, not a frame gap: it runs 60 times a second at
+//! `dt = 1/60` however fast the display is, so `t` below is a real clock and
+//! not a frame counter.
 
 use cubic_render::prelude::*;
 

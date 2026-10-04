@@ -7,6 +7,8 @@
 //! - `app` (feature `wgpu`, desktop) — the winit + wgpu window/surface shell
 //!   plus the `engine_main!` entry point a game crate generates its `main`
 //!   from.
+//! - `tick` — the fixed-timestep accumulator the runtime advances gameplay by.
+//!   Plain arithmetic, so it builds for any target and any feature set.
 //! - `platform` — per-host input adapters: `platform::native` (winit,
 //!   desktop) and `platform::web` (DOM, wasm only).
 //! - `render2d` (feature `wgpu`, desktop) — the immediate-mode 2D renderer:
@@ -18,6 +20,8 @@
 //!
 //! A game crate imports [`prelude`] and writes one `Game` impl; it should never
 //! name `winit`, `wgpu` or `cubic_core` directly.
+
+pub mod tick;
 
 #[cfg(feature = "wgpu")]
 #[cfg(not(target_arch = "wasm32"))]
@@ -41,6 +45,10 @@ pub mod canvas;
 // The runtime entry points sit at the crate root so `engine_main!` can reach
 // them through `$crate` without a version-specific path. `engine_main!` itself
 // is already at the root: `#[macro_export]` hoists it out of `app`.
+pub use tick::{DEFAULT_TICK_HZ, FixedTick, MAX_FRAME_SECONDS};
+
 #[cfg(feature = "wgpu")]
 #[cfg(not(target_arch = "wasm32"))]
-pub use app::{AppDelegate, AppError, Application, GameDelegate, WindowConfig, run_game};
+pub use app::{
+    AppDelegate, AppError, EngineApp, GameDelegate, WindowConfig, run_game, run_game_with_tick,
+};

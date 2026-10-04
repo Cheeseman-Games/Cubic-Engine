@@ -18,7 +18,7 @@ use std::collections::HashSet;
 
 use cubic_core::input::{FrameInput, InputState, KeyCode, MouseButton};
 use cubic_core::render::Rgba;
-use cubic_render::app::{AppDelegate, Application, WindowConfig};
+use cubic_render::app::{AppDelegate, EngineApp, WindowConfig};
 
 /// What the log line reports on, so the snapshot stays readable.
 const REPORTED: &[KeyCode] = &[
@@ -181,7 +181,7 @@ fn main() {
         ..WindowConfig::default()
     };
 
-    Application::new(config)
+    EngineApp::new(config)
         .run(InputDemo::new())
-        .expect("application ended early");
+        .expect("runtime ended early");
 }
