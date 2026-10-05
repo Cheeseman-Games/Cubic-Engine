@@ -6,7 +6,7 @@ edition.workspace = true
 [features]
 default = ["wgpu"]
 manifest = ["cubic-core/manifest"]
-web = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys"]
+web = ["dep:log", "dep:wasm-bindgen", "dep:js-sys", "dep:web-sys"]
 wgpu = [
     "dep:winit",
     "dep:wgpu",
@@ -15,13 +15,23 @@ wgpu = [
     "dep:log",
     "dep:bytemuck",
     "dep:env_logger",
+    "dep:image",
 ]
+
+# Development hot reload, forwarded to the core asset server. Off by default: a
+# shipped game carries its assets and has nothing to watch.
+watch = ["cubic-core/watch"]
 
 [dependencies]
 bytemuck = { version = "1", optional = true }
 cubic-core = { path = "../cubic-core" }
 env_logger = { version = "0.11", optional = true }
 glyphon = { version = "0.12", optional = true }
+# Only PNG: the format the engine's own assets are, and the only one a 2D sprite
+# pipeline needs today. Additional decoders are a feature flag away.
+image = { version = "0.25", optional = true, default-features = false, features = [
+    "png",
+] }
 log = { version = "0.4", optional = true }
 pollster = { version = "1.0", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
@@ -41,7 +51,11 @@ wgpu = { version = "30", optional = true }
 winit = { version = "0.30", optional = true }
 
 [dev-dependencies]
-env_logger = "0.11"
+# The GPU tests build their own images — an edited version, a resized one — so
+# they need the encoder, not only the decoder the `wgpu` feature pulls in.
+image = { version = "0.25", default-features = false, features = ["png"] }
+pollster = "1.0"
+wgpu = "30"
 
 [[example]]
 name = "basic"
@@ -49,6 +63,10 @@ required-features = ["wgpu"]
 
 [[example]]
 name = "draw2d"
+required-features = ["wgpu"]
+
+[[example]]
+name = "input"
 required-features = ["wgpu"]
 
 [[example]]
@@ -66,6 +84,10 @@ required-features = ["wgpu"]
 [[example]]
 name = "tick"
 required-features = ["wgpu"]
+
+[[example]]
+name = "assets"
+required-features = ["wgpu", "watch"]
 
 [lints]
 workspace = true

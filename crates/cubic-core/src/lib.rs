@@ -14,6 +14,7 @@
 //! Game crates import [`prelude`] (or `cubic_render::prelude`, which adds the
 //! runtime) rather than naming modules.
 
+pub mod assets;
 pub mod components;
 pub mod input;
 #[cfg(feature = "manifest")]
@@ -25,6 +26,8 @@ pub mod world;
 
 pub mod prelude;
 
+#[cfg(feature = "rendering")]
+use crate::assets::AssetServer;
 pub use crate::components::Transform;
 use crate::input::{FrameInput, InputState};
 #[cfg(feature = "rendering")]
@@ -70,6 +73,19 @@ pub trait Game {
     /// Emit this frame's draw commands. The host resets the list before every
     /// call, so implementations only ever push.
     fn draw(&mut self, _list: &mut crate::render::DrawList) {}
+
+    /// This game's asset server, for a host that pumps it.
+    ///
+    /// `None` by default: a game with no assets says nothing, and the host skips
+    /// the work. A game that returns its server hands the runtime two things it
+    /// must not do for itself — re-reading changed files, and importing queued
+    /// bytes into the backend — both of which need the host's device and its
+    /// frame. Everything else stays the game's: it calls
+    /// [`drain_events`](AssetServer::drain_events) to hear what happened, and
+    /// reads [`version`](AssetServer::version) to notice a reload.
+    fn assets_mut(&mut self) -> Option<&mut AssetServer> {
+        None
+    }
 
     /// Backbuffer fill for frames whose `draw` pushed no `Clear` of its own.
     ///

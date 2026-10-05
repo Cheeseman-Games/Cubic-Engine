@@ -15,6 +15,9 @@
 //!   quad batching + color instancing over wgpu.
 //! - `text` (feature `wgpu`, desktop) — glyph-atlas text for the same command
 //!   model: shaping, atlas caching, and the layout cache behind it.
+//! - `assets` (feature `wgpu`, desktop) — the GPU half of the asset pipeline:
+//!   decoding a pending asset into device texture and the bindings a textured
+//!   draw needs.
 //! - `canvas` (feature `web`, wasm only) — the legacy 2d-canvas fallback,
 //!   kept compilable until the engine fully retires it.
 //!
@@ -26,6 +29,10 @@
 //! [`run_project`] is the entry point that turns one into a running game.
 
 pub mod tick;
+
+#[cfg(feature = "wgpu")]
+#[cfg(not(target_arch = "wasm32"))]
+pub mod assets;
 
 #[cfg(feature = "manifest")]
 pub use cubic_core::manifest;

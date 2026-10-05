@@ -12,6 +12,10 @@
 
 #[cfg(feature = "rendering")]
 pub use crate::Game;
+pub use crate::assets::{
+    AssetBundle, AssetError, AssetEvent, AssetHandle, AssetKind, AssetServer, FontHandle,
+    LoadedAsset, PendingAsset, TextureHandle,
+};
 pub use crate::components::{Transform, transform_direction, transform_point};
 pub use crate::input::{FrameInput, Gamepad, InputState, KeyCode, MouseButton};
 #[cfg(feature = "manifest")]

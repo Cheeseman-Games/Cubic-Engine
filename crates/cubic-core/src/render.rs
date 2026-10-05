@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use crate::assets::TextureHandle;
+
 /// RGBA color, components normalized to 0.0..=1.0.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rgba {
@@ -39,6 +41,20 @@ pub enum DrawCommand {
         size: f32,
         color: Rgba,
     },
+    /// A whole texture, stretched into the given rectangle.
+    ///
+    /// The handle, not a path: a backend that has not imported it yet cannot draw
+    /// it and must skip the command, and one whose bytes have since been replaced
+    /// draws the new bytes without the game saying anything.
+    Texture {
+        texture: TextureHandle,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        /// Multiplied into the sampled color; white leaves the image as it is.
+        color: Rgba,
+    },
 }
 
 /// Frame-local command buffer. Persistent so each frame only pushes commands
@@ -64,6 +80,13 @@ pub trait Renderer {
     fn clear(&mut self, color: Rgba);
     fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Rgba);
     fn text(&mut self, text: &str, x: f32, y: f32, size: f32, color: Rgba);
+
+    /// Draw a texture, stretched into `x, y, w, h`.
+    ///
+    /// The whole image, tinted by `color`. Sub-rectangles, rotation and flipping
+    /// are a sprite's business rather than this command's: a command that could
+    /// express them would carry a transform every backend has to interpret.
+    fn draw_texture(&mut self, texture: TextureHandle, x: f32, y: f32, w: f32, h: f32, color: Rgba);
 }
 
 impl Renderer for DrawList {
@@ -81,6 +104,25 @@ impl Renderer for DrawList {
             x,
             y,
             size,
+            color,
+        });
+    }
+
+    fn draw_texture(
+        &mut self,
+        texture: TextureHandle,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: Rgba,
+    ) {
+        self.commands.push(DrawCommand::Texture {
+            texture,
+            x,
+            y,
+            w,
+            h,
             color,
         });
     }
@@ -136,6 +178,42 @@ mod tests {
     fn null_renderer_swallows_any_list() {
         let mut list = DrawList::new();
         list.fill_rect(0.0, 0.0, 1.0, 1.0, Rgba::rgb(1.0, 1.0, 1.0));
+        list.draw_texture(
+            TextureHandle::new(std::num::NonZeroU64::new(1).unwrap()),
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            Rgba::rgb(1.0, 1.0, 1.0),
+        );
         NullRenderer.render(&list);
+    }
+
+    /// A texture command names a handle, so it stays a name in the command stream:
+    /// copying it never copies the image.
+    #[test]
+    fn a_texture_command_carries_a_handle_not_a_path() {
+        let texture = TextureHandle::new(std::num::NonZeroU64::new(3).unwrap());
+        let mut list = DrawList::new();
+
+        list.draw_texture(texture, 4.0, 5.0, 6.0, 7.0, Rgba::rgb(1.0, 0.5, 0.0));
+
+        match &list.commands[..] {
+            [
+                DrawCommand::Texture {
+                    texture: drawn,
+                    x,
+                    y,
+                    w,
+                    h,
+                    color,
+                },
+            ] => {
+                assert_eq!(*drawn, texture);
+                assert_eq!((*x, *y, *w, *h), (4.0, 5.0, 6.0, 7.0));
+                assert_eq!(*color, Rgba::rgb(1.0, 0.5, 0.0));
+            }
+            _ => panic!("a texture draws as one texture command"),
+        }
     }
 }

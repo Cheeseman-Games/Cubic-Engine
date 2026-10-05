@@ -9,9 +9,15 @@ rendering = []
 # The `game.toml` project manifest: schema and parser. Off by default because a
 # game embeds its manifest and a headless sim has no window to describe.
 manifest = ["rendering", "dep:serde", "dep:toml"]
+# Development hot reload: re-read the assets whose files changed. Off by default
+# because a shipped game carries its assets and has nothing to watch, and because
+# the watcher needs an operating system to tell it what changed.
+watch = ["dep:log", "dep:notify"]
 
 [dependencies]
 glam = "0.30"
+log = { version = "0.4", optional = true }
+notify = { version = "8", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 toml = { version = "0.9", optional = true }
 

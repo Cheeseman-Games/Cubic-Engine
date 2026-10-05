@@ -30,6 +30,7 @@
 use std::time::{Duration, Instant};
 
 use cubic_core::Game;
+use cubic_core::assets::{AssetKind, PendingAsset};
 use cubic_core::input::{FrameInput, InputState};
 use cubic_core::render::{DrawList, Rgba};
 use winit::application::ApplicationHandler;
@@ -38,10 +39,15 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+use crate::assets::TextureStore;
 use crate::platform::native::NativeInput;
 use crate::render2d::{QuadBatch, WgpuRenderer2d};
-use crate::text::TextPipeline;
-use crate::tick::{FixedTick, MAX_FRAME_SECONDS};
+use crate::text::{FamilyOwned, TextPipeline};
+use crate::tick::FixedTick;
+// Only the manifest path names the clamp, so without that feature it is imported
+// by the function that uses it rather than here.
+#[cfg(feature = "manifest")]
+use crate::tick::MAX_FRAME_SECONDS;
 
 /// Window creation parameters for [`EngineApp::run`].
 ///
@@ -111,6 +117,20 @@ pub trait AppDelegate {
     /// (just the clear).
     fn draw(&mut self, _list: &mut DrawList) {}
 
+    /// The game's asset server, once per frame, *before* `draw`.
+    ///
+    /// The runtime uses it to keep its [`TextureStore`] current: it calls
+    /// [`pump`](cubic_core::assets::AssetServer::pump), imports
+    /// whatever the server queued, and drops textures whose last reference went
+    /// away. That is all it does — the server itself is the game's, and its events
+    /// are the game's to drain.
+    ///
+    /// `None` (the default) means a game with no assets; the runtime still pumps
+    /// nothing and draws exactly as before.
+    fn assets_mut(&mut self) -> Option<&mut cubic_core::assets::AssetServer> {
+        None
+    }
+
     /// Backbuffer fill color for frames whose `draw` pushed no `Clear`
     /// command of its own.
     fn clear_color(&self) -> Rgba;
@@ -168,9 +188,20 @@ pub struct EngineApp {
     surface: Option<wgpu::Surface<'static>>,
     surface_format: Option<wgpu::TextureFormat>,
     renderer: Option<WgpuRenderer2d>,
+    /// The device-side texture cache the renderer's textured pipeline samples
+    /// from. Created with the device, before the renderer, because the pipeline is
+    /// laid out against the store's bind group.
+    textures: Option<TextureStore>,
+    /// The asset handles this runtime has imported textures for, so a release can
+    /// be noticed without taking the game's events.
+    imported: Vec<cubic_core::assets::AssetHandle>,
     /// Built on the first frame that draws text: loading the system font
     /// database costs more than a frame, so text-free frames skip it.
     text: Option<TextPipeline>,
+    /// Fonts that arrived before `text` was built. The server has already loaded
+    /// them and will not offer them a second time, so dropping them would lose the
+    /// font for the rest of the session.
+    waiting_fonts: Vec<PendingAsset>,
     /// Window events folded into engine input by the platform adapter.
     input: NativeInput,
     /// Decides how many whole simulation steps each frame's real time is worth.
@@ -204,6 +235,9 @@ impl EngineApp {
             surface: None,
             surface_format: None,
             renderer: None,
+            textures: None,
+            imported: Vec::new(),
+            waiting_fonts: Vec::new(),
             text: None,
             input: NativeInput::new(),
             tick,
@@ -234,6 +268,94 @@ impl EngineApp {
 
     fn window(&self) -> &Window {
         self.window.as_ref().expect("window initialized before use")
+    }
+
+    /// Bring the texture store in line with the game's asset server: notice edits,
+    /// decode whatever changed, and release what no longer has a reference.
+    ///
+    /// The server is the game's, so this only reads and drains it — it never loads
+    /// anything itself, and a failed import keeps the previous version on screen
+    /// rather than taking the sprite away.
+    fn sync_assets<H: AppDelegate>(&mut self, delegate: &mut H) {
+        let Some(assets) = delegate.assets_mut() else {
+            return;
+        };
+        // Without the watcher this is free, so a release build pays nothing.
+        assets.pump();
+        let queued = assets.drain_pending();
+        // Textures first, in their own scope: the store borrow is the only thing
+        // that stops the font arm below from also taking `&mut self`, and it has no
+        // reason to outlive the loop that needs it.
+        {
+            let textures = self.textures.as_mut().expect("store initialized");
+            for pending in queued.iter().filter(|p| p.kind == AssetKind::Texture) {
+                let handle = pending.handle;
+                let first_import = !self.imported.contains(&handle);
+                if let Err(error) = textures.import(pending) {
+                    // The previous version stays drawn: a file caught half-written
+                    // by an editor should not blank the sprite.
+                    log::error!("{error}");
+                } else if first_import {
+                    self.imported.push(handle);
+                }
+            }
+            // Only textures this runtime draws are held on the device, so the moment
+            // a game drops its last reference is when the memory goes back. Asking
+            // the server rather than draining its events is deliberate: events are
+            // the game's to read, and "is this still loaded" is a question with one
+            // answer.
+            self.imported.retain(|handle| {
+                if assets.is_loaded(*handle) {
+                    true
+                } else {
+                    textures.forget(*handle);
+                    false
+                }
+            });
+        }
+
+        for pending in queued.into_iter().filter(|p| p.kind != AssetKind::Texture) {
+            match pending.kind {
+                // A font is not a texture, so it is registered rather than
+                // imported. Registering again on reload is what makes an edited font
+                // take effect.
+                AssetKind::Font => match self.text.is_some() {
+                    true => self.register_font(pending),
+                    false => self.waiting_fonts.push(pending),
+                },
+                AssetKind::Bytes => log::debug!(
+                    "`{}` is bytes, not something this runtime draws",
+                    pending.path
+                ),
+                AssetKind::Texture => unreachable!("filtered out above"),
+            }
+        }
+
+        // A text pipeline built since the last sync hands over whatever it was not
+        // around to take, so a font loaded before the game's first label is still
+        // registered — just one frame later than the file arrived.
+        if self.text.is_some() && !self.waiting_fonts.is_empty() {
+            for pending in std::mem::take(&mut self.waiting_fonts) {
+                self.register_font(pending);
+            }
+        }
+    }
+
+    /// Register one font with the text pipeline, which then draws it.
+    ///
+    /// A font is not a texture, so it is registered rather than imported, and
+    /// registering again is what makes an edited font take effect. The family is
+    /// adopted as the default because a game that loads a font has almost always
+    /// loaded it to draw with.
+    fn register_font(&mut self, pending: PendingAsset) {
+        let Some(text) = self.text.as_mut() else {
+            log::debug!("`{}` has no text pipeline yet", pending.path);
+            return;
+        };
+        match text.add_font(&pending.path, &pending.bytes) {
+            Some(family) => text.set_family(FamilyOwned::Name(family.into())),
+            None => log::error!("`{}` is not a font this pipeline can read", pending.path),
+        }
     }
 
     fn request_redraw(&self) {
@@ -296,6 +418,9 @@ impl EngineApp {
         // Presentation: one draw per frame regardless of how many steps ran, so
         // the delegate can coalesce a burst into a single picture.
         self.frame_list.reset();
+        // Assets are pumped before the draw, so an edit made since the last frame
+        // is in the texture store by the time the frame that names it is flushed.
+        self.sync_assets(delegate);
         delegate.draw(&mut self.frame_list);
 
         let surface_texture = match self.acquire_frame() {
@@ -315,6 +440,7 @@ impl EngineApp {
 
         let device = self.device.as_ref().expect("device initialized");
         let queue = self.queue.as_ref().expect("queue initialized");
+        let textures = self.textures.as_ref().expect("store initialized");
         let renderer = self.renderer.as_mut().expect("renderer initialized");
 
         let size = [self.size.width as f32, self.size.height as f32];
@@ -335,14 +461,9 @@ impl EngineApp {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("cubic-2d present"),
         });
-        if let Err(error) = renderer.render(
-            device,
-            queue,
-            &mut encoder,
-            &view,
-            &batch,
-            self.text.as_mut(),
-        ) {
+        if let Err(error) =
+            renderer.render(&mut encoder, &view, &batch, self.text.as_mut(), textures)
+        {
             // The pass is dropped uncalled, so the frame still presents with
             // the clear color instead of stalling the loop.
             log::error!("drawing text failed: {error}");
@@ -491,7 +612,10 @@ impl<H: AppDelegate> Runner<H> {
         );
 
         let render_format = surface_format.add_srgb_suffix();
-        let renderer = WgpuRenderer2d::new(&device, render_format);
+        // The store exists before the renderer because the textured pipeline's
+        // layout is built from the store's bind group layout.
+        let textures = TextureStore::new(&device, &queue);
+        let renderer = WgpuRenderer2d::new(&device, &queue, render_format, &textures);
 
         self.app.window = Some(window);
         self.app.instance = Some(instance);
@@ -500,6 +624,7 @@ impl<H: AppDelegate> Runner<H> {
         self.app.surface = Some(surface);
         self.app.surface_format = Some(surface_format);
         self.app.renderer = Some(renderer);
+        self.app.textures = Some(textures);
         self.app.size = size;
         self.app.configure_surface();
         self.app.request_redraw();
@@ -576,6 +701,10 @@ impl<G: Game> AppDelegate for GameDelegate<G> {
 
     fn draw(&mut self, list: &mut DrawList) {
         self.game.draw(list);
+    }
+
+    fn assets_mut(&mut self) -> Option<&mut cubic_core::assets::AssetServer> {
+        self.game.assets_mut()
     }
 
     fn clear_color(&self) -> Rgba {

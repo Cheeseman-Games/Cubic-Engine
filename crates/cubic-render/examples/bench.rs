@@ -139,6 +139,7 @@ fn dispatch_canvas(list: &DrawList, sink: &mut CanvasSink) {
                 sink.set_fill_style_str(&css_color(*color));
                 sink.fill_rect((*x).into(), (*y).into(), (*w).into(), (*h).into());
             }
+            DrawCommand::Texture { .. } => {}
             DrawCommand::Text { .. } => {}
         }
     }

@@ -204,6 +204,42 @@ impl TextPipeline {
         &mut self.font_system
     }
 
+    /// Register font file bytes and name the family they define.
+    ///
+    /// This is the font half of the asset pipeline: the bytes come from an
+    /// [`AssetServer`](cubic_core::assets::AssetServer) font asset, and the family
+    /// name that comes back is what [`set_family`](Self::set_family) takes — so
+    /// the same file can be reloaded without the game re-plumbing anything.
+    ///
+    /// Returns `None` if the bytes are not a font the database can read, leaving it
+    /// untouched: a game then keeps the family it had rather than falling back to
+    /// one it never asked for. `path` is only in the log line.
+    pub fn add_font(&mut self, path: &str, bytes: &[u8]) -> Option<String> {
+        // `load_font_source` rather than `load_font_data`, because only the former
+        // says which faces arrived — and naming one of those faces is the whole
+        // point of registering a font.
+        let ids = self
+            .font_system
+            .db_mut()
+            .load_font_source(fontdb::Source::Binary(std::sync::Arc::new(bytes.to_vec())));
+        let db = self.font_system.db();
+        let family = ids
+            .first()
+            .and_then(|id| db.face(*id))
+            .and_then(|face| face.families.first())
+            .map(|(name, _)| name.clone());
+        match family {
+            Some(family) => {
+                log::info!("registered `{path}` as `{family}`");
+                Some(family)
+            }
+            None => {
+                log::error!("`{path}` defined no font family");
+                None
+            }
+        }
+    }
+
     /// Size the glyph atlas for a whole frame.
     ///
     /// Call this once per frame, with every text span the frame will draw, before
