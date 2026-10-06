@@ -1,0 +1,19 @@
+[package]
+name = "cubic-editor"
+description = "Desktop editor shell for cubic games"
+version.workspace = true
+edition.workspace = true
+
+# The editor is desktop-only for now. eframe can target wasm later, but pinning
+# these under `not(target_arch = "wasm32")` keeps the workspace's
+# `wasm32-unknown-unknown` build green and skips fetching the eframe tree for it.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Pin egui/eframe and egui_dock together: eframe ships its own wgpu backend, and
+# `cubic-render` drives the same wgpu major. 0.36 and 0.21 sit on wgpu 30.
+eframe = { version = "0.36", features = ["persistence"] }
+egui = "0.36"
+egui_dock = { version = "0.21", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true
