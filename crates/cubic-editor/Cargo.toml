@@ -14,6 +14,14 @@ eframe = { version = "0.36", features = ["persistence"] }
 egui = "0.36"
 egui_dock = { version = "0.21", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
+# What a project *is* (game.toml, the generator) lives in the CLI, so the editor
+# discovers and creates projects by the same rules as `cubic-cli new` instead of
+# restating them.
+cubic-cli = { path = "../cubic-cli" }
+# PNG (the engine's own format) plus JPEG for previews; decoders only.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Native Open/New Project dialogs.
+rfd = "0.17"
 
 [lints]
 workspace = true

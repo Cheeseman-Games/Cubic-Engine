@@ -2,11 +2,16 @@
 //!
 //! Panels are plain functions of [`EditorState`]; the dockable layout lives in
 //! the same struct so the whole editor state can be persisted with one `serde`
-//! round-trip (see `app::EditorApp::save`).
+//! round-trip (see `app::EditorApp::save`). Anything that must outlive a frame
+//! — the open project, tree expansion, the active preview — is here.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use cubic_cli::Project;
 use egui_dock::{DockState, NodeIndex};
+
+use crate::preview::Preview;
+use crate::tree::TreeState;
 
 /// A dockable editor pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -29,8 +34,8 @@ impl Pane {
     }
 }
 
-/// What the viewport currently has selected.
-#[derive(Clone, Debug, Default)]
+/// What the editor has selected.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Selection {
     #[default]
     None,
@@ -55,13 +60,33 @@ pub struct LogLine {
     pub text: String,
 }
 
+/// A file dialog a menu item or shortcut asked for, run once the frame's UI is
+/// done (see [`crate::project::run_pending`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pending {
+    NewProject,
+    OpenProject,
+}
+
+/// The name form for `File > New Project…`, after a folder was picked.
+pub struct NewProjectForm {
+    /// The directory the new project is generated inside.
+    pub parent: PathBuf,
+    /// The typed project (and crate) name.
+    pub name: String,
+    /// Whether the name field still wants keyboard focus (first frame only).
+    pub focus: bool,
+    /// Why the last attempt failed, shown in the window.
+    pub error: Option<String>,
+}
+
 /// Cap on retained console lines; keeps the editor lean over long sessions.
 const MAX_CONSOLE_LINES: usize = 500;
 
 /// All editor state that outlives a single frame.
 pub struct EditorState {
-    /// Open project root, when one is loaded.
-    pub project: Option<PathBuf>,
+    /// The open project: its root directory and parsed `game.toml`.
+    pub project: Option<Project>,
     /// Open scene file, when one is loaded.
     pub scene: Option<PathBuf>,
     /// The current selection.
@@ -76,6 +101,14 @@ pub struct EditorState {
     pub console_input: String,
     /// Transient message shown in the status bar.
     pub status: String,
+    /// Project tree expansion and inline editors.
+    pub tree: TreeState,
+    /// The file open in the viewport preview, if any.
+    pub preview: Option<Preview>,
+    /// Dialog waiting to run this frame.
+    pub pending: Option<Pending>,
+    /// The new-project name window, while it is up.
+    pub new_project: Option<NewProjectForm>,
 }
 
 impl Default for EditorState {
@@ -89,6 +122,10 @@ impl Default for EditorState {
             console: Vec::new(),
             console_input: String::new(),
             status: String::new(),
+            tree: TreeState::default(),
+            preview: None,
+            pending: None,
+            new_project: None,
         }
     }
 }
@@ -96,6 +133,18 @@ impl Default for EditorState {
 impl EditorState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The open project's root directory, if a project is open.
+    pub fn project_root(&self) -> Option<&Path> {
+        self.project.as_ref().map(|project| project.root.as_path())
+    }
+
+    /// The open project's name from `game.toml`, if a project is open.
+    pub fn project_name(&self) -> Option<&str> {
+        self.project
+            .as_ref()
+            .map(|project| project.manifest.game.name.as_str())
     }
 
     /// Appends a line to the console, trimming the oldest lines past the cap.
@@ -172,10 +221,17 @@ mod tests {
 
     #[test]
     fn reset_dock_restores_default_layout() {
-        let mut state = EditorState::default();
+        let mut state = EditorState::new();
         state.dock = DockState::new(vec![Pane::Viewport]);
         state.reset_dock();
         assert!(tab_set(&state).contains(&Pane::Project));
         assert!(tab_set(&state).contains(&Pane::Console));
+    }
+
+    #[test]
+    fn project_helpers_are_none_without_a_project() {
+        let state = EditorState::default();
+        assert_eq!(state.project_root(), None);
+        assert_eq!(state.project_name(), None);
     }
 }

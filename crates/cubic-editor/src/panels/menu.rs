@@ -3,27 +3,27 @@
 use egui::Button;
 use egui::Panel;
 
-use crate::state::{EditorState, LogLevel};
+use crate::project;
+use crate::state::{EditorState, LogLevel, Pending};
 
 /// Draws the top menu bar into the window.
 pub fn menu_bar(ui: &mut egui::Ui, state: &mut EditorState) {
     Panel::top("menu_bar").show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.menu_button("File", |ui| {
-                if clickable(ui, "New", "Ctrl+N").clicked() {
+                if clickable(ui, "New Project…", "Ctrl+N").clicked() {
                     ui.close();
-                    state.log(
-                        LogLevel::Info,
-                        "New project: file dialog comes with project support",
-                    );
+                    state.pending = Some(Pending::NewProject);
                 }
-                if clickable(ui, "Open...", "Ctrl+O").clicked() {
+                if clickable(ui, "Open Project…", "Ctrl+O").clicked() {
                     ui.close();
-                    state.log(
-                        LogLevel::Info,
-                        "Open project: file dialog comes with project support",
-                    );
+                    state.pending = Some(Pending::OpenProject);
                 }
+                if state.project.is_some() && clickable(ui, "Close Project", "").clicked() {
+                    ui.close();
+                    project::close_project(state);
+                }
+                ui.separator();
                 if clickable(ui, "Save", "Ctrl+S").clicked() {
                     ui.close();
                     state.mark_saved();

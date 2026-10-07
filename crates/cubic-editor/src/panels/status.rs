@@ -8,15 +8,14 @@ use crate::state::EditorState;
 pub fn status_bar(ui: &mut egui::Ui, state: &mut EditorState) {
     Panel::bottom("status_bar").show(ui, |ui| {
         ui.horizontal(|ui| {
-            let project = state
-                .project
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "no project".to_owned());
+            let project = match (state.project_name(), state.project_root()) {
+                (Some(name), Some(root)) => format!("{name} ({})", root.display()),
+                _ => "no project".to_owned(),
+            };
             let scene = state
                 .scene
                 .as_ref()
-                .map(|s| s.display().to_string())
+                .map(|scene| crate::project::shown(state, scene))
                 .unwrap_or_else(|| "no scene".to_owned());
             ui.label(format!("project: {project}"));
             ui.separator();
