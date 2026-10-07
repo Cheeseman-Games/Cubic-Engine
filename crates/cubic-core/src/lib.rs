@@ -9,7 +9,8 @@
 //! The `rendering` feature (on by default) provides the render command
 //! model; disable it (`--no-default-features`) for a headless,
 //! dependency-free sim core. The `manifest` feature adds the `game.toml`
-//! project manifest on top of it.
+//! project manifest on top of it, and the `scene` feature adds the `.rsn`
+//! `Scene` model for loading and saving levels.
 //!
 //! Game crates import [`prelude`] (or `cubic_render::prelude`, which adds the
 //! runtime) rather than naming modules.
@@ -22,6 +23,8 @@ pub mod manifest;
 pub mod math;
 #[cfg(feature = "rendering")]
 pub mod render;
+#[cfg(feature = "scene")]
+pub mod scene;
 pub mod world;
 
 pub mod prelude;

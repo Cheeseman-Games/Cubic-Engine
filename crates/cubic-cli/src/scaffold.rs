@@ -331,8 +331,9 @@ impl {{Game}} {
     pub fn new() -> Self {
         let mut world = World::new();
 
-        // The scene's entities go here. `assets/scenes/main.rsn` is where an
-        // authored scene lands once the editor can save one.
+        // The scene's entities go here. `assets/scenes/main.rsn` is the file an
+        // authored scene lands in: the editor opens it from this path and
+        // writes back to it, so hand-authored entities would be overwritten.
         let player = world.spawn();
         world.insert(player, Transform::from_position(Vec2::ZERO));
 
@@ -456,12 +457,20 @@ impl System for Drift {
 "#;
 
 /// The generated scene placeholder.
-const SCENE_RSN: &str = r#"# Scene: main
-#
-# Scenes are written by the editor: entities and their components, serialized in
-# a diffable text format. That format arrives with the editor's scene model, so
-# this file is a placeholder rather than a scene — it is here so the path a
-# project's first scene will use already exists.
+///
+/// An authored scene starts where an empty one does: `Scene(version: 1, ...)`
+/// with no entities. It even is one — round-tripping this file through
+/// `cubic_core::scene::Scene` is a test — so the editor opens a fresh project
+/// to a scene it can already save.
+const SCENE_RSN: &str = r#"// Scene: main
+//
+// Scenes are written by the editor: entities and their components, serialized
+// in a diffable text format — one component per line, one entity per block.
+// This one is empty, which is how a new level begins.
+Scene(
+    version: 1,
+    entities: [],
+)
 "#;
 
 #[cfg(test)]
@@ -597,6 +606,20 @@ mod tests {
                 "assets/scenes/main.rsn",
             ]
         );
+    }
+
+    /// A generated project's empty scene must stay a scene the engine can
+    /// both read and write, or a fresh project would corner its editor.
+    #[test]
+    fn the_generated_scene_is_a_valid_empty_scene() {
+        let text = file("demo", "assets/scenes/main.rsn");
+        let scene: cubic_core::scene::Scene = text
+            .parse()
+            .expect("the generated scene must parse as a scene");
+        assert_eq!(scene.version, cubic_core::scene::Scene::VERSION);
+        assert!(scene.entities.is_empty());
+        let round = scene.to_text().expect("the empty scene must serialize");
+        assert_eq!(round, "Scene(\n    version: 1,\n    entities: [],\n)\n");
     }
 
     /// A generated manifest that the engine's own parser refuses would be a

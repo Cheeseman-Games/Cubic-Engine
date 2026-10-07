@@ -8,7 +8,14 @@ default = ["rendering"]
 rendering = []
 # The `game.toml` project manifest: schema and parser. Off by default because a
 # game embeds its manifest and a headless sim has no window to describe.
-manifest = ["rendering", "dep:serde", "dep:toml"]
+manifest = ["rendering", "serde", "dep:toml"]
+# `serde` derives on engine types (currently `Transform`) plus `glam`'s, and the
+# serde dependency itself; the serializable-widget features stack on top.
+serde = ["dep:serde", "glam/serde"]
+# The `Scene` model: a versioned, diffable snapshot of a `World` that keeps its
+# `.rsn` files loadable forever. Off by default because a game's levels are
+# baked in, not opened at runtime.
+scene = ["serde", "dep:ron"]
 # Development hot reload: re-read the assets whose files changed. Off by default
 # because a shipped game carries its assets and has nothing to watch, and because
 # the watcher needs an operating system to tell it what changed.
@@ -18,6 +25,7 @@ watch = ["dep:log", "dep:notify"]
 glam = "0.30"
 log = { version = "0.4", optional = true }
 notify = { version = "8", optional = true }
+ron = { version = "0.12", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 toml = { version = "0.9", optional = true }
 

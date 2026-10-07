@@ -12,6 +12,11 @@ pub type EntityId = u32;
 /// hashing or indirection.
 trait ComponentStore {
     fn clear_at(&mut self, id: EntityId);
+    /// Number of addressable slots, dead or alive.
+    fn len(&self) -> usize;
+    /// Whether the slot at `id` still holds a value — i.e. the id names a
+    /// live entity by this store.
+    fn is_live(&self, id: EntityId) -> bool;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -21,6 +26,12 @@ impl<T: Any + 'static> ComponentStore for Vec<Option<T>> {
         if let Some(slot) = self.get_mut(id as usize) {
             *slot = None;
         }
+    }
+    fn len(&self) -> usize {
+        self.len()
+    }
+    fn is_live(&self, id: EntityId) -> bool {
+        self.get(id as usize).is_some_and(Option::is_some)
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -81,6 +92,39 @@ impl World {
             store.clear_at(id);
         }
         self.free.push(id);
+    }
+
+    /// Spawn right at `id`, keeping `next_id` and the free list consistent.
+    ///
+    /// Re-hydration from a scene needs exact ids (a `Transform` in the file
+    /// must land on the entity it is saved beside), so `World` lets a loader
+    /// dictate them. `free` and `next_id` are just bookkeeping, so this is
+    /// O(1) in them: an id past `next_id` advances the counter, and an id
+    /// already on the free list is taken off it.
+    pub fn spawn_at(&mut self, id: EntityId) {
+        self.free.retain(|&free| free != id);
+        self.next_id = self.next_id.max(id + 1);
+    }
+
+    /// Every live entity id, ascending, component or not.
+    ///
+    /// The union of all component stores' dense spans, with despawned (cleared
+    /// but still possibly inside a store's span) ids filtered out. Scenes are
+    /// saved from this, so it must be deterministic — it is, unlike iterating
+    /// `stores`, whose insertion order (and therefore `TypeId`) is arbitrary.
+    pub fn entities(&self) -> Vec<EntityId> {
+        let mut alive: Vec<EntityId> = self
+            .stores
+            .values()
+            .flat_map(|store| {
+                (0..store.len())
+                    .filter(|&id| store.is_live(id as EntityId))
+                    .map(|id| id as EntityId)
+            })
+            .collect();
+        alive.sort();
+        alive.dedup();
+        alive
     }
 
     pub fn get<T: Any + 'static>(&self, id: EntityId) -> Option<&T> {
@@ -210,5 +254,56 @@ mod tests {
             h.0 += 10;
         }
         assert_eq!(world.get::<Health>(id), Some(&Health(13)));
+    }
+
+    #[test]
+    fn spawn_at_places_an_entity_at_a_chosen_id() {
+        let mut world = World::new();
+        assert_eq!(world.spawn(), 0);
+        world.insert(0, Health(1));
+        world.spawn_at(2);
+        world.insert(2, Health(9));
+        assert_eq!(world.entities(), vec![0, 2]);
+        // `next_id` was bumped past the re-hydrated id.
+        assert_eq!(world.spawn(), 3);
+    }
+
+    #[test]
+    fn spawn_at_takes_a_recycled_id_back_off_the_free_list() {
+        let mut world = World::new();
+        let dead = world.spawn();
+        world.despawn(dead);
+        let live = world.spawn();
+        world.despawn(live);
+        // `dead` is sitting on the free list; re-hydrating it must not let the
+        // next spawn steal it.
+        world.spawn_at(dead);
+        assert_ne!(world.spawn(), dead);
+    }
+
+    #[test]
+    fn entities_lists_live_ids_ascending_and_skips_despawned() {
+        let mut world = World::new();
+        let a = world.spawn();
+        let b = world.spawn();
+        let c = world.spawn();
+        world.insert(a, Health(1));
+        world.insert(b, 2.5f32);
+        world.insert(c, Health(3));
+        world.despawn(b);
+
+        assert_eq!(world.entities(), vec![a, c]);
+    }
+
+    #[test]
+    fn entities_is_order_stable_across_store_creation() {
+        let mut world = World::new();
+        let a = world.spawn();
+        // Component store creation order differs from id order; the ids come
+        // back sorted regardless.
+        world.insert(a, 1.0f32);
+        let b = world.spawn();
+        world.insert(b, Health(2));
+        assert_eq!(world.entities(), vec![a, b]);
     }
 }

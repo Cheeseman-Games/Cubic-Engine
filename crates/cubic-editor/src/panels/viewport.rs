@@ -58,8 +58,8 @@ fn draw_overlay(painter: &egui::Painter, rect: Rect, state: &EditorState) {
     let scene = state
         .scene
         .as_ref()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
+        .and_then(|scene| scene.path.file_name())
+        .and_then(|name| name.to_str())
         .unwrap_or("<no scene>");
     let (w, h) = (rect.size().x, rect.size().y);
     let color = Color32::from_rgb(0xbb, 0xbb, 0xbb);

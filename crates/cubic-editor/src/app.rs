@@ -57,7 +57,7 @@ impl EditorApp {
             self.state.pending = Some(Pending::OpenProject);
         }
         if consumed(ctx, egui::KeyboardShortcut::new(ctrl, egui::Key::S)) {
-            self.state.mark_saved();
+            project::save_scene(&mut self.state);
         }
         if consumed(
             ctx,

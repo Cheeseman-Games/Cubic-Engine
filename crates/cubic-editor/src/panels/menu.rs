@@ -26,7 +26,7 @@ pub fn menu_bar(ui: &mut egui::Ui, state: &mut EditorState) {
                 ui.separator();
                 if clickable(ui, "Save", "Ctrl+S").clicked() {
                     ui.close();
-                    state.mark_saved();
+                    project::save_scene(state);
                 }
                 ui.separator();
                 if clickable(ui, "Quit", "Ctrl+Q").clicked() {

@@ -5,7 +5,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-cubic-core = { path = "../cubic-core", features = ["manifest"] }
+cubic-core = { path = "../cubic-core", features = ["manifest", "scene"] }
 toml = "0.9"
 
 [lints]

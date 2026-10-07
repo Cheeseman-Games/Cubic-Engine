@@ -11,9 +11,10 @@
 use std::path::{Path, PathBuf};
 
 use cubic_cli::{EngineSource, Project, scaffold};
+use cubic_core::scene::Scene;
 
 use crate::preview::{self, PreviewKind};
-use crate::state::{EditorState, LogLevel, NewProjectForm, Pending, Selection};
+use crate::state::{EditorState, LogLevel, NewProjectForm, OpenScene, Pending, Selection};
 use crate::tree::{self, TreeState};
 
 /// How a file opened from the tree is shown.
@@ -83,14 +84,7 @@ pub fn close_project(state: &mut EditorState) {
 pub fn open_file(state: &mut EditorState, ctx: &egui::Context, path: PathBuf) {
     state.selection = Selection::File(path.clone());
     match classify(&path) {
-        Some(OpenKind::Scene) => {
-            state.scene = Some(path.clone());
-            state.preview = None;
-            state.log(
-                LogLevel::Info,
-                format!("opened scene {}", shown(state, &path)),
-            );
-        }
+        Some(OpenKind::Scene) => open_scene(state, path),
         Some(kind) => {
             let preview = preview::load(&path, kind, ctx);
             if let PreviewKind::Error(message) = &preview.kind {
@@ -105,6 +99,55 @@ pub fn open_file(state: &mut EditorState, ctx: &egui::Context, path: PathBuf) {
                 shown(state, &path)
             ),
         ),
+    }
+}
+
+/// Reads a `.rsn` file into the open scene.
+///
+/// A file that will not parse keeps whatever scene was open before it; a file
+/// that parses replaces the scene even if some components are unknown, with
+/// the skipped ones logged as warnings rather than failing the whole load.
+fn open_scene(state: &mut EditorState, path: PathBuf) {
+    state.preview = None;
+    let loaded = match Scene::load(&path).and_then(|scene| scene.to_world(&state.registry)) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            state.log(
+                LogLevel::Error,
+                format!("could not open scene {}: {error}", shown(state, &path)),
+            );
+            return;
+        }
+    };
+    for warning in loaded.warnings {
+        state.log(LogLevel::Warn, warning);
+    }
+    state.scene = Some(OpenScene {
+        path: path.clone(),
+        world: loaded.world,
+    });
+    state.dirty = false;
+    state.log(
+        LogLevel::Info,
+        format!("opened scene {}", shown(state, &path)),
+    );
+}
+
+/// Writes the open scene back to its `.rsn` file.
+///
+/// `File > Save` and Ctrl+S both land here; it is the only thing that ever
+/// clears the dirty flag, so a scene is never marked saved it was not.
+pub fn save_scene(state: &mut EditorState) {
+    let Some(open) = state.scene.as_ref() else {
+        state.log(LogLevel::Warn, "nothing to save — no scene is open");
+        return;
+    };
+    let outcome = Scene::from_world(&open.world, &state.registry)
+        .and_then(|scene| scene.save(&open.path))
+        .map_err(|error| format!("could not save {}: {error}", open.path.display()));
+    match outcome {
+        Ok(()) => state.mark_saved(),
+        Err(message) => state.log(LogLevel::Error, message),
     }
 }
 
@@ -294,7 +337,7 @@ fn delete_window(ctx: &egui::Context, state: &mut EditorState) {
     if state
         .scene
         .as_ref()
-        .is_some_and(|scene| scene.starts_with(&path))
+        .is_some_and(|scene| scene.path.starts_with(&path))
     {
         state.scene = None;
     }
@@ -327,10 +370,24 @@ mod tests {
     use super::*;
     use crate::preview::PreviewKind;
     use crate::scratch::Scratch;
+    use cubic_core::Transform;
+    use cubic_core::math::Vec2;
+    use cubic_core::scene::SceneRegistry;
+    use cubic_core::world::World;
 
     /// A minimal manifest — every field but the name has a default.
     fn manifest(name: &str) -> String {
         format!("[game]\nname = \"{name}\"\n")
+    }
+
+    /// A scene file body with nothing in it.
+    fn empty_scene_text() -> String {
+        Scene {
+            version: Scene::VERSION,
+            entities: vec![],
+        }
+        .to_text()
+        .expect("the empty scene serializes")
     }
 
     #[test]
@@ -387,7 +444,10 @@ mod tests {
 
         let mut state = EditorState::new();
         open_project(&mut state, &root).expect("open");
-        state.scene = Some(root.join("assets/scenes/main.rsn"));
+        state.scene = Some(OpenScene {
+            path: root.join("assets/scenes/main.rsn"),
+            world: World::new(),
+        });
         state.selection = Selection::File(root.join("game.toml"));
 
         close_project(&mut state);
@@ -431,13 +491,20 @@ mod tests {
     }
 
     #[test]
-    fn opening_a_scene_sets_it_and_a_text_file_previews() {
+    fn opening_a_scene_loads_its_world_and_a_text_file_previews() {
         let scratch = Scratch::new("open-file");
         let root = scratch.join("demo");
         std::fs::create_dir_all(root.join("assets/scenes")).expect("dirs");
         std::fs::write(root.join("game.toml"), manifest("demo")).expect("manifest");
         let scene = root.join("assets/scenes/main.rsn");
-        std::fs::write(&scene, "[]").expect("scene file");
+        let mut world = World::new();
+        let hero = world.spawn();
+        world.insert(hero, Transform::from_position(Vec2::new(3.0, 4.0)));
+        let text = Scene::from_world(&world, &SceneRegistry::engine_defaults())
+            .expect("a scene from a world")
+            .to_text()
+            .expect("serializes");
+        std::fs::write(&scene, text).expect("scene file");
         let notes = root.join("notes.txt");
         std::fs::write(&notes, "hello").expect("notes");
 
@@ -446,12 +513,19 @@ mod tests {
         let ctx = egui::Context::default();
 
         open_file(&mut state, &ctx, scene.clone());
-        assert_eq!(state.scene, Some(scene.clone()));
+        let open = state.scene.as_ref().expect("a scene is open");
+        assert_eq!(open.path, scene);
+        assert_eq!(
+            open.world.get::<Transform>(0),
+            Some(&Transform::from_position(Vec2::new(3.0, 4.0))),
+            "opening a scene loads its entities"
+        );
+        assert!(!state.dirty, "a fresh open is not modified");
         assert!(state.preview.is_none(), "a scene is not a preview");
 
         open_file(&mut state, &ctx, notes.clone());
         assert_eq!(
-            state.scene,
+            state.scene.as_ref().map(|open| open.path.clone()),
             Some(scene.clone()),
             "peeking at a file must not close the scene underneath"
         );
@@ -478,6 +552,67 @@ mod tests {
                 .iter()
                 .any(|line| line.level == LogLevel::Warn),
             "the console should say there is no preview"
+        );
+    }
+
+    #[test]
+    fn a_broken_scene_is_refused_and_keeps_the_previous_one() {
+        let scratch = Scratch::new("broken-scene");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(root.join("assets/scenes")).expect("dirs");
+        std::fs::write(root.join("game.toml"), manifest("demo")).expect("manifest");
+        let scene = root.join("assets/scenes/main.rsn");
+        std::fs::write(&scene, empty_scene_text()).expect("scene file");
+        let broken = root.join("assets/scenes/broken.rsn");
+        std::fs::write(&broken, "not a scene").expect("broken scene");
+
+        let mut state = EditorState::new();
+        open_project(&mut state, &root).expect("open");
+        let ctx = egui::Context::default();
+        open_file(&mut state, &ctx, scene.clone());
+        assert!(state.scene.is_some(), "the good scene opened");
+
+        open_file(&mut state, &ctx, broken);
+        // The failed open left the previous scene in place.
+        assert_eq!(
+            state.scene.as_ref().map(|open| open.path.clone()),
+            Some(scene)
+        );
+    }
+
+    #[test]
+    fn saving_writes_the_open_scene_back_to_disk() {
+        let scratch = Scratch::new("save-scene");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(root.join("assets/scenes")).expect("dirs");
+        std::fs::write(root.join("game.toml"), manifest("demo")).expect("manifest");
+        let scene = root.join("assets/scenes/main.rsn");
+        std::fs::write(&scene, empty_scene_text()).expect("scene file");
+
+        let mut state = EditorState::new();
+        open_project(&mut state, &root).expect("open");
+        let ctx = egui::Context::default();
+        open_file(&mut state, &ctx, scene.clone());
+        state.dirty = true;
+
+        let spawned = {
+            let open = state.scene.as_mut().expect("a scene");
+            let id = open.world.spawn();
+            open.world
+                .insert(id, Transform::from_position(Vec2::new(5.0, 6.0)));
+            id
+        };
+        save_scene(&mut state);
+
+        assert!(!state.dirty, "a save clears the dirty flag");
+        let saved = Scene::load(&scene).expect("the saved scene parses");
+        let world = saved
+            .to_world(&SceneRegistry::engine_defaults())
+            .expect("loads")
+            .world;
+        assert_eq!(
+            world.get::<Transform>(spawned),
+            Some(&Transform::from_position(Vec2::new(5.0, 6.0)))
         );
     }
 

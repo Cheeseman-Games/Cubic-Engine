@@ -206,8 +206,8 @@ fn rename_row(ui: &mut egui::Ui, state: &mut EditorState, path: &std::path::Path
         Ok(new_path) => {
             state.log(LogLevel::Info, format!("renamed to `{name}`"));
             state.selection = Selection::File(new_path.clone());
-            if state.scene.as_ref().is_some_and(|scene| scene == path) {
-                state.scene = Some(new_path.clone());
+            if state.scene.as_ref().is_some_and(|scene| scene.path == path) {
+                state.scene.as_mut().expect("just checked it is open").path = new_path.clone();
             }
             if let Some(preview) = state.preview.as_mut()
                 && preview.path == path

@@ -10,6 +10,7 @@ use crate::math::{Mat4, Vec2, Vec3};
 ///
 /// Components compose parent-before-child, so `to_mat4` is `T * parent` and a
 /// child offset is expressed in the parent's rotated/scaled space.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transform {
     pub position: Vec2,

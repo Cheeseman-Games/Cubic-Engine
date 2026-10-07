@@ -18,6 +18,9 @@ serde = { version = "1", features = ["derive"] }
 # discovers and creates projects by the same rules as `cubic-cli new` instead of
 # restating them.
 cubic-cli = { path = "../cubic-cli" }
+# The scene model: opening and saving `.rsn` files needs `Scene` and the world
+# snapshotting behind it.
+cubic-core = { path = "../cubic-core", features = ["scene"] }
 # PNG (the engine's own format) plus JPEG for previews; decoders only.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # Native Open/New Project dialogs.

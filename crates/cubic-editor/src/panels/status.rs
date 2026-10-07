@@ -15,7 +15,7 @@ pub fn status_bar(ui: &mut egui::Ui, state: &mut EditorState) {
             let scene = state
                 .scene
                 .as_ref()
-                .map(|scene| crate::project::shown(state, scene))
+                .map(|scene| crate::project::shown(state, &scene.path))
                 .unwrap_or_else(|| "no scene".to_owned());
             ui.label(format!("project: {project}"));
             ui.separator();

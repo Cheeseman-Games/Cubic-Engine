@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use cubic_cli::Project;
+use cubic_core::scene::SceneRegistry;
+use cubic_core::world::World;
 use egui_dock::{DockState, NodeIndex};
 
 use crate::preview::Preview;
@@ -83,12 +85,23 @@ pub struct NewProjectForm {
 /// Cap on retained console lines; keeps the editor lean over long sessions.
 const MAX_CONSOLE_LINES: usize = 500;
 
+/// A `.rsn` scene open for editing: where it lives and what it currently
+/// holds. The world is only in memory until `project::save_scene` writes it
+/// back out — that is what turns edits into a file.
+pub struct OpenScene {
+    pub path: PathBuf,
+    pub world: World,
+}
+
 /// All editor state that outlives a single frame.
 pub struct EditorState {
     /// The open project: its root directory and parsed `game.toml`.
     pub project: Option<Project>,
-    /// Open scene file, when one is loaded.
-    pub scene: Option<PathBuf>,
+    /// The open scene's file path and world, when one is loaded.
+    pub scene: Option<OpenScene>,
+    /// Component names the scene files in this project may hold, and how each
+    /// one travels between a `World` and a `.rsn` file.
+    pub registry: SceneRegistry,
     /// The current selection.
     pub selection: Selection,
     /// Whether the open scene has unsaved changes.
@@ -116,6 +129,7 @@ impl Default for EditorState {
         Self {
             project: None,
             scene: None,
+            registry: SceneRegistry::engine_defaults(),
             selection: Selection::None,
             dirty: false,
             dock: default_dock(),
@@ -159,8 +173,8 @@ impl EditorState {
         }
     }
 
-    /// Marks the open scene as saved. Scene serialization itself lands with the
-    /// scene model; this only clears the dirty flag for the shell.
+    /// Clears the dirty flag after `project::save_scene` has written the open
+    /// scene back to its file.
     pub fn mark_saved(&mut self) {
         self.dirty = false;
         self.status = "saved".to_owned();
