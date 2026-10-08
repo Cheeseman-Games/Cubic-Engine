@@ -835,6 +835,7 @@ version = "0.1.0"
 dependencies = [
  "cubic-cli",
  "cubic-core",
+ "cubic-render",
  "eframe",
  "egui",
  "egui_dock",

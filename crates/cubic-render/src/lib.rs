@@ -13,6 +13,9 @@
 //!   desktop) and `platform::web` (DOM, wasm only).
 //! - `render2d` (feature `wgpu`, desktop) — the immediate-mode 2D renderer:
 //!   quad batching + color instancing over wgpu.
+//! - `offscreen` (feature `wgpu`, desktop) — the same renderer aimed at a
+//!   texture the caller owns, for hosts that present the scene inside their
+//!   own UI instead of a swapchain (the editor's viewport).
 //! - `text` (feature `wgpu`, desktop) — glyph-atlas text for the same command
 //!   model: shaping, atlas caching, and the layout cache behind it.
 //! - `assets` (feature `wgpu`, desktop) — the GPU half of the asset pipeline:
@@ -40,6 +43,10 @@ pub use cubic_core::manifest;
 #[cfg(feature = "wgpu")]
 #[cfg(not(target_arch = "wasm32"))]
 pub mod app;
+
+#[cfg(feature = "wgpu")]
+#[cfg(not(target_arch = "wasm32"))]
+pub mod offscreen;
 
 pub mod platform;
 

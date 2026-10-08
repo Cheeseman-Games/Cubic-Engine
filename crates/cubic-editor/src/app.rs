@@ -8,6 +8,7 @@ use crate::dock;
 use crate::panels;
 use crate::project;
 use crate::state::{EditorState, LogLevel, Pane, Pending, Selection};
+use crate::viewport::ViewportHost;
 
 /// Storage key for the persisted dock layout.
 const DOCK_LAYOUT_KEY: &str = "cubic_editor.dock_layout";
@@ -17,6 +18,10 @@ const PROJECT_ROOT_KEY: &str = "cubic_editor.project_root";
 /// Root application type hosted by `eframe`.
 pub struct EditorApp {
     pub state: EditorState,
+    /// The viewport's engine side: offscreen target and camera. Kept out of
+    /// `EditorState` because it holds GPU resources, which are per-run rather
+    /// than persisted editor state.
+    pub viewport: ViewportHost,
 }
 
 impl EditorApp {
@@ -41,7 +46,10 @@ impl EditorApp {
                 format!("could not reopen {}: {error}", root.display()),
             );
         }
-        Self { state }
+        Self {
+            state,
+            viewport: ViewportHost::new(),
+        }
     }
 
     /// Global keyboard shortcuts. Skipped while any widget owns the keyboard.
@@ -85,11 +93,14 @@ fn consumed(ctx: &egui::Context, shortcut: egui::KeyboardShortcut) -> bool {
 }
 
 impl eframe::App for EditorApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Before any panel runs: the viewport needs the device/queue eframe
+        // renders with, so its target is built on the same GPU state.
+        self.viewport.set_render_state(frame.wgpu_render_state());
         self.handle_shortcuts(ui.ctx());
         panels::menu_bar(ui, &mut self.state);
         panels::status_bar(ui, &mut self.state);
-        dock::show_docked(ui, &mut self.state);
+        dock::show_docked(ui, &mut self.state, &mut self.viewport);
         // After the frame's UI: run any dialog a menu or shortcut asked for, so
         // no egui closure is on the stack when the native dialog blocks.
         project::run_pending(&mut self.state);

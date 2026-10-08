@@ -3,8 +3,9 @@
 //! [`run`] opens the editor window (eframe on the wgpu backend `cubic-render`
 //! targets), with a dockable layout of plain-function panels driven by
 //! [`state::EditorState`]. A project (`game.toml`) opens and is created through
-//! [`project`], browsed in a file tree ([`tree`]), and opened files preview in
-//! the viewport ([`preview`]).
+//! [`project`], browsed in a file tree ([`tree`]), opened files preview in the
+//! viewport ([`preview`]), and the open scene renders through the engine into
+//! that same viewport ([`viewport`]).
 //!
 //! Desktop-only: the crate compiles to an empty unit on wasm so the workspace's
 //! `wasm32-unknown-unknown` build stays green (the editor ports to wasm later).
@@ -18,6 +19,7 @@ pub mod preview;
 pub mod project;
 pub mod state;
 pub mod tree;
+pub mod viewport;
 
 pub use app::EditorApp;
 pub use state::EditorState;
