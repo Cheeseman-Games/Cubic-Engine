@@ -42,6 +42,7 @@ use winit::window::{Window, WindowId};
 use crate::assets::TextureStore;
 use crate::platform::native::NativeInput;
 use crate::render2d::{QuadBatch, WgpuRenderer2d};
+use crate::runtime::EngineRuntime;
 use crate::text::{FamilyOwned, TextPipeline};
 use crate::tick::FixedTick;
 // Only the manifest path names the clamp, so without that feature it is imported
@@ -202,13 +203,9 @@ pub struct EngineApp {
     /// them and will not offer them a second time, so dropping them would lose the
     /// font for the rest of the session.
     waiting_fonts: Vec<PendingAsset>,
-    /// Window events folded into engine input by the platform adapter.
-    input: NativeInput,
-    /// Decides how many whole simulation steps each frame's real time is worth.
-    tick: FixedTick,
-    /// This step's drained edges, kept alive because `update` borrows it
-    /// alongside the delegate's own state.
-    frame: FrameInput,
+    /// The simulation half: the input pump (`NativeInput`, fed by window events)
+    /// and the fixed-tick clock that decides how many steps each frame is worth.
+    runtime: EngineRuntime<NativeInput>,
     frame_list: DrawList,
     size: PhysicalSize<u32>,
     last_frame: Option<Instant>,
@@ -239,9 +236,7 @@ impl EngineApp {
             imported: Vec::new(),
             waiting_fonts: Vec::new(),
             text: None,
-            input: NativeInput::new(),
-            tick,
-            frame: FrameInput::default(),
+            runtime: EngineRuntime::new(NativeInput::new(), tick),
             frame_list: DrawList::new(),
             size: PhysicalSize::new(0, 0),
             last_frame: None,
@@ -399,7 +394,7 @@ impl EngineApp {
         let elapsed = self
             .last_frame
             .map(|t| (now - t).as_secs_f32())
-            .unwrap_or(self.tick.step());
+            .unwrap_or(self.runtime.tick().step());
         self.last_frame = Some(now);
 
         // Simulation: `update` runs once per whole step, always with the same
@@ -407,13 +402,7 @@ impl EngineApp {
         // that earns no step leaves the bank untouched and skips `update`
         // entirely; a frame that earns several runs `update` that many times, so
         // slow frames neither lose nor overshoot simulation time.
-        advance_simulation(
-            &mut self.tick,
-            &mut self.input,
-            &mut self.frame,
-            elapsed,
-            delegate,
-        );
+        self.runtime.advance(elapsed, delegate);
 
         // Presentation: one draw per frame regardless of how many steps ran, so
         // the delegate can coalesce a burst into a single picture.
@@ -530,35 +519,6 @@ impl EngineApp {
     }
 }
 
-/// Run `elapsed` seconds of real time through the fixed-step clock, calling
-/// `delegate.update` once per whole step and returning how many ran.
-///
-/// Free-standing rather than a method so the stepping rule can be tested without
-/// a window: this is the function the determinism contract lives in, and it must
-/// not be verifiable only by watching pixels move.
-///
-/// `frame` is the scratch slot the drained edges are parked in; it is kept
-/// outside so the borrow of the held input state and the frame edges can both
-/// outlive a single call.
-fn advance_simulation<H: AppDelegate>(
-    tick: &mut FixedTick,
-    input: &mut NativeInput,
-    frame: &mut FrameInput,
-    elapsed: f32,
-    delegate: &mut H,
-) -> u32 {
-    let step = tick.step();
-    let mut ran = 0;
-    for _ in 0..tick.advance(elapsed) {
-        // Drain per step, not per frame: a press that arrived between two steps
-        // of the same frame is one press, so only the first step sees it.
-        *frame = input.begin_frame();
-        delegate.update(step, input.state(), frame);
-        ran += 1;
-    }
-    ran
-}
-
 /// Bridges [`EngineApp`] into winit's event loop.
 struct Runner<H> {
     app: EngineApp,
@@ -651,7 +611,7 @@ impl<H: AppDelegate> ApplicationHandler for Runner<H> {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         // Fold first: the adapter ignores anything it does not handle, so every
         // event reaches input without this arm needing to enumerate them.
-        self.app.input.handle_event(&event);
+        self.app.runtime.input_mut().handle_event(&event);
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -863,12 +823,10 @@ mod tests {
         (input, frame)
     }
 
-    /// Everything [`advance_simulation`] needs, so each test states only the
-    /// frame times it cares about.
+    /// Everything the runtime needs, so each test states only the frame times it
+    /// cares about.
     struct Harness {
-        tick: FixedTick,
-        input: NativeInput,
-        frame: FrameInput,
+        runtime: EngineRuntime<NativeInput>,
         probe: Shared,
         delegate: GameDelegate<ProbeGame>,
     }
@@ -877,9 +835,7 @@ mod tests {
         fn new() -> Self {
             let probe: Shared = Rc::new(RefCell::new(Probe::default()));
             Self {
-                tick: FixedTick::default(),
-                input: NativeInput::new(),
-                frame: FrameInput::default(),
+                runtime: EngineRuntime::new(NativeInput::new(), FixedTick::default()),
                 delegate: GameDelegate::new(ProbeGame(Rc::clone(&probe))),
                 probe,
             }
@@ -887,13 +843,7 @@ mod tests {
 
         /// Feed one frame of real elapsed time through the clock.
         fn frame(&mut self, elapsed: f32) -> u32 {
-            advance_simulation(
-                &mut self.tick,
-                &mut self.input,
-                &mut self.frame,
-                elapsed,
-                &mut self.delegate,
-            )
+            self.runtime.advance(elapsed, &mut self.delegate)
         }
 
         fn dts(&self) -> Vec<f32> {
@@ -959,13 +909,14 @@ mod tests {
         let mut delegate = GameDelegate::new(Press {
             seen: Rc::clone(&seen),
         });
-        let mut input = NativeInput::new();
-        input.state_mut().key_down(KeyCode::Space);
-        let mut frame = FrameInput::default();
         // A 1/16 s step, so three of them is exactly representable.
-        let mut tick = FixedTick::new(0.0625, MAX_FRAME_SECONDS);
+        let mut runtime = EngineRuntime::new(
+            NativeInput::new(),
+            FixedTick::new(0.0625, MAX_FRAME_SECONDS),
+        );
+        runtime.input_mut().state_mut().key_down(KeyCode::Space);
 
-        let ran = advance_simulation(&mut tick, &mut input, &mut frame, 0.1875, &mut delegate);
+        let ran = runtime.advance(0.1875, &mut delegate);
 
         assert_eq!(ran, 3);
         assert_eq!(*seen.borrow(), vec![true, false, false]);

@@ -6,6 +6,7 @@ mod inspector;
 mod menu;
 mod project;
 mod status;
+mod toolbar;
 mod viewport;
 
 pub use console::console;
@@ -13,4 +14,5 @@ pub use inspector::inspector;
 pub use menu::menu_bar;
 pub use project::project;
 pub use status::status_bar;
+pub use toolbar::toolbar;
 pub use viewport::viewport;

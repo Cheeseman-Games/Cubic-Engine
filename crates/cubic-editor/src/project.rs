@@ -54,6 +54,7 @@ pub fn open_project(state: &mut EditorState, path: &Path) -> Result<(), String> 
 
     state.project = Some(project);
     state.scene = None;
+    state.play.cancel();
     state.preview = None;
     state.selection = Selection::None;
     state.dirty = false;
@@ -72,6 +73,7 @@ pub fn close_project(state: &mut EditorState) {
         return;
     }
     state.scene = None;
+    state.play.cancel();
     state.preview = None;
     state.selection = Selection::None;
     state.dirty = false;
@@ -109,6 +111,9 @@ pub fn open_file(state: &mut EditorState, ctx: &egui::Context, path: PathBuf) {
 /// the skipped ones logged as warnings rather than failing the whole load.
 fn open_scene(state: &mut EditorState, path: PathBuf) {
     state.preview = None;
+    // Any run of the previous scene is over: its snapshot describes a world
+    // that is about to be replaced.
+    state.play.cancel();
     let loaded = match Scene::load(&path).and_then(|scene| scene.to_world(&state.registry)) {
         Ok(loaded) => loaded,
         Err(error) => {
@@ -340,6 +345,7 @@ fn delete_window(ctx: &egui::Context, state: &mut EditorState) {
         .is_some_and(|scene| scene.path.starts_with(&path))
     {
         state.scene = None;
+        state.play.cancel();
     }
     if state
         .preview

@@ -12,7 +12,9 @@ use cubic_core::scene::SceneRegistry;
 use cubic_core::world::World;
 use egui_dock::{DockState, NodeIndex};
 
+use crate::play::Play;
 use crate::preview::Preview;
+use crate::run::RunState;
 use crate::tree::TreeState;
 
 /// A dockable editor pane.
@@ -118,6 +120,10 @@ pub struct EditorState {
     pub tree: TreeState,
     /// The file open in the viewport preview, if any.
     pub preview: Option<Preview>,
+    /// Play mode: the runtime and the snapshot Stop restores.
+    pub play: Play,
+    /// The project process started by "Run", if one is live.
+    pub run: RunState,
     /// Dialog waiting to run this frame.
     pub pending: Option<Pending>,
     /// The new-project name window, while it is up.
@@ -138,6 +144,8 @@ impl Default for EditorState {
             status: String::new(),
             tree: TreeState::default(),
             preview: None,
+            play: Play::default(),
+            run: RunState::default(),
             pending: None,
             new_project: None,
         }
@@ -170,6 +178,15 @@ impl EditorState {
         if self.console.len() > MAX_CONSOLE_LINES {
             let overflow = self.console.len() - MAX_CONSOLE_LINES;
             self.console.drain(..overflow);
+        }
+    }
+
+    /// Records a command's outcome in the console: the message on success, the
+    /// reason on refusal. The transport and Run both report through here.
+    pub fn report(&mut self, outcome: Result<String, String>) {
+        match outcome {
+            Ok(message) => self.log(LogLevel::Info, message),
+            Err(message) => self.log(LogLevel::Error, message),
         }
     }
 

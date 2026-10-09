@@ -4,6 +4,7 @@ use egui::Button;
 use egui::Panel;
 
 use crate::project;
+use crate::run;
 use crate::state::{EditorState, LogLevel, Pending};
 
 /// Draws the top menu bar into the window.
@@ -29,6 +30,22 @@ pub fn menu_bar(ui: &mut egui::Ui, state: &mut EditorState) {
                     project::save_scene(state);
                 }
                 ui.separator();
+                let has_project = state.project.is_some();
+                let run_item = Button::new("Run Project").shortcut_text("F8").frame(false);
+                if ui
+                    .add_enabled(has_project && !state.run.is_running(), run_item)
+                    .clicked()
+                {
+                    ui.close();
+                    let outcome = run::run_project(state);
+                    state.report(outcome);
+                }
+                let stop_item = Button::new("Stop Running").shortcut_text("F8").frame(false);
+                if ui.add_enabled(state.run.is_running(), stop_item).clicked() {
+                    ui.close();
+                    let outcome = run::stop_run(state);
+                    state.report(outcome);
+                }
                 if clickable(ui, "Quit", "Ctrl+Q").clicked() {
                     ui.close();
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);

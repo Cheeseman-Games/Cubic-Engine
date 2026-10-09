@@ -25,8 +25,8 @@ pub use crate::tick::{DEFAULT_TICK_HZ, FixedTick, MAX_FRAME_SECONDS};
 #[cfg(feature = "wgpu")]
 #[cfg(not(target_arch = "wasm32"))]
 pub use crate::{
-    AppDelegate, AppError, EngineApp, GameDelegate, WindowConfig, engine_main, run_game,
-    run_game_with_tick,
+    AppDelegate, AppError, EngineApp, EngineRuntime, GameDelegate, InputSource, WindowConfig,
+    engine_main, run_game, run_game_with_tick,
 };
 
 /// The project manifest — the `game.toml` a project is described by — plus the

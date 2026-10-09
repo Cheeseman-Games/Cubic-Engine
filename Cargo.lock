@@ -840,6 +840,7 @@ dependencies = [
  "egui",
  "egui_dock",
  "image",
+ "log",
  "rfd",
  "serde",
 ]

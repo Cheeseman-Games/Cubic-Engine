@@ -28,6 +28,8 @@ cubic-render = { path = "../cubic-render" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # Native Open/New Project dialogs.
 rfd = "0.17"
+# The editor installs a `log` logger so engine records land in the Console pane.
+log = "0.4"
 
 [lints]
 workspace = true

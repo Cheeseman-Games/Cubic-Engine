@@ -7,6 +7,9 @@
 //! - `app` (feature `wgpu`, desktop) — the winit + wgpu window/surface shell
 //!   plus the `engine_main!` entry point a game crate generates its `main`
 //!   from.
+//! - `runtime` (feature `wgpu`, desktop) — the windowless half of a host: the
+//!   fixed-tick clock and input pump an editor, a bench or a test drives
+//!   directly, without owning a window or GPU.
 //! - `tick` — the fixed-timestep accumulator the runtime advances gameplay by.
 //!   Plain arithmetic, so it builds for any target and any feature set.
 //! - `platform` — per-host input adapters: `platform::native` (winit,
@@ -50,6 +53,10 @@ pub mod offscreen;
 
 pub mod platform;
 
+#[cfg(feature = "wgpu")]
+#[cfg(not(target_arch = "wasm32"))]
+pub mod runtime;
+
 pub mod prelude;
 
 #[cfg(feature = "wgpu")]
@@ -73,6 +80,10 @@ pub use tick::{DEFAULT_TICK_HZ, FixedTick, MAX_FRAME_SECONDS};
 pub use app::{
     AppDelegate, AppError, EngineApp, GameDelegate, WindowConfig, run_game, run_game_with_tick,
 };
+
+#[cfg(feature = "wgpu")]
+#[cfg(not(target_arch = "wasm32"))]
+pub use runtime::{EngineRuntime, InputSource};
 
 #[cfg(feature = "manifest")]
 #[cfg(feature = "wgpu")]

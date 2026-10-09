@@ -6,7 +6,9 @@ use egui_dock::DockState;
 
 use crate::dock;
 use crate::panels;
+use crate::play;
 use crate::project;
+use crate::run;
 use crate::state::{EditorState, LogLevel, Pane, Pending, Selection};
 use crate::viewport::ViewportHost;
 
@@ -77,6 +79,29 @@ impl EditorApp {
         if consumed(ctx, egui::KeyboardShortcut::new(ctrl, egui::Key::Q)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        // Play transport. Plain function keys, so they do not collide with the
+        // Ctrl-held file shortcuts above.
+        if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
+            let outcome = play::toggle_play(&mut self.state);
+            self.state.report(outcome);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F6)) {
+            let outcome = play::step_play(&mut self.state);
+            self.state.report(outcome);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F7)) {
+            let outcome = play::stop_play(&mut self.state);
+            self.state.report(outcome);
+        }
+        // F8 toggles the project run: stop a live one, otherwise start one.
+        if ctx.input(|i| i.key_pressed(egui::Key::F8)) {
+            let outcome = if self.state.run.is_running() {
+                run::stop_run(&mut self.state)
+            } else {
+                run::run_project(&mut self.state)
+            };
+            self.state.report(outcome);
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape))
             && !matches!(self.state.selection, Selection::None)
             && self.state.tree.confirm_delete.is_none()
@@ -98,13 +123,34 @@ impl eframe::App for EditorApp {
         // renders with, so its target is built on the same GPU state.
         self.viewport.set_render_state(frame.wgpu_render_state());
         self.handle_shortcuts(ui.ctx());
+        // Run the play clock, then ask for another frame while it is running:
+        // egui is event-driven, so without this an idle window would stop
+        // repainting and the simulation would appear to freeze mid-run.
+        let elapsed = ui.ctx().input(|i| i.stable_dt);
+        self.state.play.advance(&mut self.state.scene, elapsed);
+        if self.state.play.is_playing() {
+            ui.ctx().request_repaint();
+        }
+        // One running project at a time: fold its output into the console and,
+        // while it is live, keep the frame clock going the same way Play does.
+        for (level, line) in self.state.run.take_output() {
+            self.state.log(level, line);
+        }
+        if self.state.run.is_running() {
+            ui.ctx().request_repaint();
+        }
         panels::menu_bar(ui, &mut self.state);
+        panels::toolbar(ui, &mut self.state);
         panels::status_bar(ui, &mut self.state);
         dock::show_docked(ui, &mut self.state, &mut self.viewport);
         // After the frame's UI: run any dialog a menu or shortcut asked for, so
         // no egui closure is on the stack when the native dialog blocks.
         project::run_pending(&mut self.state);
         project::modal_windows(ui.ctx(), &mut self.state);
+        // Finally, fold anything the engine logged during the frame into the
+        // console; it is drained once per frame so the pane shows this frame's
+        // records in order, after the panel that displays them has drawn.
+        crate::logging::drain_into(&mut self.state);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

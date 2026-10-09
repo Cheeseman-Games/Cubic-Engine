@@ -14,9 +14,12 @@
 
 pub mod app;
 pub mod dock;
+pub mod logging;
 pub mod panels;
+pub mod play;
 pub mod preview;
 pub mod project;
+pub mod run;
 pub mod state;
 pub mod tree;
 pub mod viewport;
@@ -40,6 +43,7 @@ pub fn run() -> eframe::Result<()> {
 
 /// Opens the editor with explicit eframe options.
 pub fn run_with_options(options: eframe::NativeOptions) -> eframe::Result<()> {
+    logging::install();
     eframe::run_native(
         "Cubic Editor",
         options,
