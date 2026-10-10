@@ -6,6 +6,10 @@ edition.workspace = true
 [features]
 default = ["rendering"]
 rendering = []
+# Component reflection: the type-erased field descriptors the inspector and,
+# later, prefabs read and write a component through. Needs the render command
+# model (for `Rgba`) and the derive macros that produce the descriptors.
+reflect = ["rendering", "dep:cubic-derive"]
 # The `game.toml` project manifest: schema and parser. Off by default because a
 # game embeds its manifest and a headless sim has no window to describe.
 manifest = ["rendering", "serde", "dep:toml"]
@@ -22,6 +26,7 @@ scene = ["serde", "dep:ron"]
 watch = ["dep:log", "dep:notify"]
 
 [dependencies]
+cubic-derive = { path = "../cubic-derive", optional = true }
 glam = "0.30"
 log = { version = "0.4", optional = true }
 notify = { version = "8", optional = true }

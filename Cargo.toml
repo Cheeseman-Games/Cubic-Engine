@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cubic-cli", "crates/cubic-core", "crates/cubic-editor", "crates/cubic-render"]
+members = ["crates/cubic-cli", "crates/cubic-core", "crates/cubic-derive", "crates/cubic-editor", "crates/cubic-render"]
 resolver = "3"
 
 [workspace.package]

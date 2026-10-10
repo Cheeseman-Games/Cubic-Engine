@@ -20,7 +20,7 @@ serde = { version = "1", features = ["derive"] }
 cubic-cli = { path = "../cubic-cli" }
 # The scene model: opening and saving `.rsn` files needs `Scene` and the world
 # snapshotting behind it.
-cubic-core = { path = "../cubic-core", features = ["scene"] }
+cubic-core = { path = "../cubic-core", features = ["scene", "reflect"] }
 # The viewport renders through the engine's wgpu backend into a texture egui
 # samples: eframe's device/queue drive `WgpuRenderer2d` via `Offscreen2d`.
 cubic-render = { path = "../cubic-render" }

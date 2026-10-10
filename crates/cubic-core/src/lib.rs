@@ -9,8 +9,9 @@
 //! The `rendering` feature (on by default) provides the render command
 //! model; disable it (`--no-default-features`) for a headless,
 //! dependency-free sim core. The `manifest` feature adds the `game.toml`
-//! project manifest on top of it, and the `scene` feature adds the `.rsn`
-//! `Scene` model for loading and saving levels.
+//! project manifest on top of it, the `scene` feature adds the `.rsn`
+//! `Scene` model for loading and saving levels, and the `reflect` feature
+//! adds component reflection for the editor's inspector.
 //!
 //! Game crates import [`prelude`] (or `cubic_render::prelude`, which adds the
 //! runtime) rather than naming modules.
@@ -21,11 +22,19 @@ pub mod input;
 #[cfg(feature = "manifest")]
 pub mod manifest;
 pub mod math;
+#[cfg(feature = "reflect")]
+pub mod reflect;
 #[cfg(feature = "rendering")]
 pub mod render;
 #[cfg(feature = "scene")]
 pub mod scene;
 pub mod world;
+
+// The reflection derives reach this crate by its own name, exactly as a game
+// crate does, so that a `#[derive(Inspectable)]` inside `cubic-core` expands
+// the same way one outside it does.
+#[cfg(feature = "reflect")]
+extern crate self as cubic_core;
 
 pub mod prelude;
 

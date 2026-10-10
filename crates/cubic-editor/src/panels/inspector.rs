@@ -1,9 +1,13 @@
 //! Right pane: property editor for the current selection.
 //!
-//! Reflection-driven field editing lands later; this pane reports the
-//! selection and marks the spot.
+//! A selection of an entity draws every component the reflection registry
+//! knows it holds, and beneath each one a read-only listing of the field
+//! descriptors — name and current value per field. Edit widgets land with the
+//! inspector session; the reflection surface they drive is what is wired here.
 
 use egui::CollapsingHeader;
+
+use cubic_core::world::EntityId;
 
 use crate::state::{EditorState, Selection};
 
@@ -11,7 +15,8 @@ use crate::state::{EditorState, Selection};
 pub fn inspector(ui: &mut egui::Ui, state: &mut EditorState) {
     ui.heading("Inspector");
     ui.separator();
-    match &state.selection {
+    let selection = state.selection.clone();
+    match &selection {
         Selection::None => {
             ui.label("Nothing selected.");
             ui.label("Select a file in the Project pane to inspect it.");
@@ -20,16 +25,7 @@ pub fn inspector(ui: &mut egui::Ui, state: &mut EditorState) {
             ui.label("File");
             ui.label(egui::RichText::new(path.display().to_string()).monospace());
         }
-        Selection::Entity(id) => {
-            ui.label("Entity");
-            ui.label(egui::RichText::new(format!("#{id}")).monospace());
-            ui.separator();
-            CollapsingHeader::new("Transform")
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.label("Field editing comes with reflection support.");
-                });
-        }
+        Selection::Entity(id) => draw_entity(ui, state, *id as EntityId),
     }
     ui.separator();
     if state.dirty {
@@ -37,5 +33,37 @@ pub fn inspector(ui: &mut egui::Ui, state: &mut EditorState) {
             egui::RichText::new("Scene has unsaved changes.")
                 .color(egui::Color32::from_rgb(0xe5, 0x9b, 0x3b)),
         );
+    }
+}
+
+/// One reflected component of `entity`: its fields, name and current value.
+fn draw_entity(ui: &mut egui::Ui, state: &EditorState, entity: EntityId) {
+    ui.label("Entity");
+    ui.label(egui::RichText::new(format!("#{entity}")).monospace());
+    ui.separator();
+    let Some(scene) = &state.scene else {
+        ui.label("No scene open.");
+        return;
+    };
+    let components = state.components.on_entity(&scene.world, entity);
+    if components.is_empty() {
+        ui.label("This entity has no reflected components.");
+        return;
+    }
+    for entry in components {
+        CollapsingHeader::new(entry.name)
+            .default_open(true)
+            .show(ui, |ui| {
+                let Some(component) = entry.read(&scene.world, entity) else {
+                    ui.label("Component is gone.");
+                    return;
+                };
+                for field in entry.fields {
+                    ui.horizontal(|ui| {
+                        ui.label(field.name());
+                        ui.label(egui::RichText::new(field.get(component).to_string()).monospace());
+                    });
+                }
+            });
     }
 }

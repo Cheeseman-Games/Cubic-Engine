@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use cubic_cli::Project;
+use cubic_core::reflect::ComponentRegistry;
 use cubic_core::scene::SceneRegistry;
 use cubic_core::world::World;
 use egui_dock::{DockState, NodeIndex};
@@ -104,6 +105,9 @@ pub struct EditorState {
     /// Component names the scene files in this project may hold, and how each
     /// one travels between a `World` and a `.rsn` file.
     pub registry: SceneRegistry,
+    /// Every component type the inspector can address by name, with the field
+    /// descriptors to read and edit one on a selected entity.
+    pub components: ComponentRegistry,
     /// The current selection.
     pub selection: Selection,
     /// Whether the open scene has unsaved changes.
@@ -136,6 +140,7 @@ impl Default for EditorState {
             project: None,
             scene: None,
             registry: SceneRegistry::engine_defaults(),
+            components: ComponentRegistry::engine_defaults(),
             selection: Selection::None,
             dirty: false,
             dock: default_dock(),
