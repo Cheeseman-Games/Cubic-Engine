@@ -3,7 +3,7 @@
 //! A generated project is an ordinary crate — `Cargo.toml`, `src/`, `assets/` —
 //! plus the `game.toml` that describes it. The templates here are the whole
 //! project: a manifest that runs as-is, an entry point that reads it, a game
-//! that ticks and draws, one system, and a placeholder scene.
+//! that ticks and draws, one system, and a starter scene.
 //!
 //! The templates are filled with `{{name}}`-style placeholders rather than
 //! `format!` because they are mostly Rust source, and Rust source is full of
@@ -331,9 +331,9 @@ impl {{Game}} {
     pub fn new() -> Self {
         let mut world = World::new();
 
-        // The scene's entities go here. `assets/scenes/main.rsn` is the file an
-        // authored scene lands in: the editor opens it from this path and
-        // writes back to it, so hand-authored entities would be overwritten.
+        // The player the system drifts. The editor's scene mirrors this entity
+        // as `assets/scenes/main.rsn`; the running game builds its world in
+        // code rather than loading the scene.
         let player = world.spawn();
         world.insert(player, Transform::from_position(Vec2::ZERO));
 
@@ -456,20 +456,31 @@ impl System for Drift {
 }
 "#;
 
-/// The generated scene placeholder.
+/// The generated scene.
 ///
-/// An authored scene starts where an empty one does: `Scene(version: 1, ...)`
-/// with no entities. It even is one — round-tripping this file through
-/// `cubic_core::scene::Scene` is a test — so the editor opens a fresh project
-/// to a scene it can already save.
+/// It is not empty: it holds the project's one entity — the cube `src/game.rs`
+/// drifts — as a `Transform` at the origin, so a fresh project opens in the
+/// editor with a marker in the viewport and a row in the hierarchy rather than
+/// a blank scene. Round-tripping this file through `cubic_core::scene::Scene`
+/// is a test, so it stays a scene the editor can both read and save.
 const SCENE_RSN: &str = r#"// Scene: main
 //
 // Scenes are written by the editor: entities and their components, serialized
 // in a diffable text format — one component per line, one entity per block.
-// This one is empty, which is how a new level begins.
+// This one carries the project's player, parked where `src/game.rs` spawns it.
 Scene(
     version: 1,
-    entities: [],
+    entities: [
+        SceneEntity(
+            id: 0,
+            components: [
+                SceneComponent(
+                    name: "Transform",
+                    value: (position:(0.0,0.0),rotation:0.0,scale:(1.0,1.0)),
+                ),
+            ],
+        ),
+    ],
 )
 "#;
 
@@ -608,18 +619,34 @@ mod tests {
         );
     }
 
-    /// A generated project's empty scene must stay a scene the engine can
-    /// both read and write, or a fresh project would corner its editor.
+    /// A generated project's scene must stay a scene the engine can both read
+    /// and write, or a fresh project would corner its editor. It also carries
+    /// the example's entity, so a new project does not open on a blank scene.
     #[test]
-    fn the_generated_scene_is_a_valid_empty_scene() {
+    fn the_generated_scene_is_a_valid_scene_holding_the_player() {
         let text = file("demo", "assets/scenes/main.rsn");
         let scene: cubic_core::scene::Scene = text
             .parse()
             .expect("the generated scene must parse as a scene");
         assert_eq!(scene.version, cubic_core::scene::Scene::VERSION);
-        assert!(scene.entities.is_empty());
-        let round = scene.to_text().expect("the empty scene must serialize");
-        assert_eq!(round, "Scene(\n    version: 1,\n    entities: [],\n)\n");
+        assert_eq!(scene.entities.len(), 1, "the example has one entity");
+        assert_eq!(scene.entities[0].components.len(), 1);
+
+        let loaded = scene
+            .to_world(&cubic_core::scene::SceneRegistry::engine_defaults())
+            .expect("the generated scene must load into a world");
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert_eq!(
+            loaded.world.get::<cubic_core::components::Transform>(0),
+            Some(&cubic_core::components::Transform::from_position(
+                cubic_core::math::Vec2::ZERO
+            )),
+            "the entity is the player cube at the origin"
+        );
+
+        let round = scene.to_text().expect("the scene must serialize");
+        let again: cubic_core::scene::Scene = round.parse().expect("the round trip parses");
+        assert_eq!(again, scene, "the file is a fixed point of its own text");
     }
 
     /// A generated manifest that the engine's own parser refuses would be a

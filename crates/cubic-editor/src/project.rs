@@ -504,6 +504,34 @@ mod tests {
         assert!(error.contains("crate name"), "{error}");
     }
 
+    /// A project the editor generates must open onto a scene that is not
+    /// empty: the hierarchy and viewport have nothing to show otherwise, which
+    /// is the whole point of the generated scene carrying the example entity.
+    #[test]
+    fn a_generated_project_opens_onto_a_scene_with_an_entity() {
+        let scratch = Scratch::new("generated-scene");
+        let mut state = EditorState::new();
+        let form = NewProjectForm {
+            parent: scratch.path.clone(),
+            name: "demo".to_owned(),
+            focus: false,
+            error: None,
+        };
+        create_project(&mut state, &form).expect("generated and opened");
+        let scene = scratch.join("demo/assets/scenes/main.rsn");
+        let ctx = egui::Context::default();
+
+        open_file(&mut state, &ctx, scene.clone());
+
+        let open = state.scene.as_ref().expect("the scene opened");
+        assert_eq!(open.path, scene);
+        assert_eq!(
+            open.world.get::<Transform>(0),
+            Some(&Transform::from_position(Vec2::ZERO)),
+            "a new project's scene holds the example's player"
+        );
+    }
+
     #[test]
     fn opening_a_scene_loads_its_world_and_a_text_file_previews() {
         let scratch = Scratch::new("open-file");
