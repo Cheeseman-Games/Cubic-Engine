@@ -18,6 +18,7 @@
 
 pub mod assets;
 pub mod components;
+pub mod hierarchy;
 pub mod input;
 #[cfg(feature = "manifest")]
 pub mod manifest;

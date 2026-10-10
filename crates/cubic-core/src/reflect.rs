@@ -66,6 +66,7 @@ pub use cubic_derive::{Component, Inspectable};
 
 use crate::assets::AssetHandle;
 use crate::components::Transform;
+use crate::hierarchy::Parent;
 use crate::math::Vec2;
 use crate::render::Rgba;
 use crate::world::{EntityId, World};
@@ -395,6 +396,10 @@ impl std::error::Error for FieldError {}
 /// are the only place the concrete type still exists.
 type ReadFn = for<'a> fn(&'a World, EntityId) -> Option<&'a dyn Any>;
 type ReadMutFn = for<'a> fn(&'a mut World, EntityId) -> Option<&'a mut dyn Any>;
+/// Takes a component off an entity, reporting whether there was one.
+type RemoveFn = fn(&mut World, EntityId) -> bool;
+/// Gives an entity the type's default instance, for an "add component" menu.
+type DefaultInsertFn = fn(&mut World, EntityId);
 
 /// One registered component type: its identity, its fields, and how to reach
 /// it inside a [`World`].
@@ -412,6 +417,12 @@ pub struct ComponentEntry {
     pub fields: &'static [Field],
     read: ReadFn,
     read_mut: ReadMutFn,
+    remove: RemoveFn,
+    /// `Some` when the type can be given to an entity from scratch —
+    /// [`register_addable`](ComponentRegistry::register_addable). Structural
+    /// components the editor must not offer to add (`Parent`, say) leave this
+    /// `None`.
+    default_insert: Option<DefaultInsertFn>,
 }
 
 impl fmt::Debug for ComponentEntry {
@@ -465,6 +476,41 @@ impl ComponentEntry {
         };
         field.set(component, value).map(Some)
     }
+
+    /// Takes this component off `entity`, reporting whether it held one.
+    ///
+    /// This is the generic half of an editor's "remove component" menu: the
+    /// same call removes a `Transform` or a `Parent`, and a caller that must
+    /// be able to undo the removal should capture the component first (see
+    /// [`SceneRegistry::snapshot_entity`](crate::scene::SceneRegistry::snapshot_entity)).
+    pub fn remove(&self, world: &mut World, entity: EntityId) -> bool {
+        (self.remove)(world, entity)
+    }
+
+    /// Whether [`add_default`](Self::add_default) has something to add.
+    ///
+    /// False for components an entity cannot pick up out of a menu — ones
+    /// only a command that knows what it is doing should write, because a
+    /// bare default of them would be meaningless or wrong.
+    pub fn is_addable(&self) -> bool {
+        self.default_insert.is_some()
+    }
+
+    /// Gives `entity` a fresh default of this component, reporting success.
+    ///
+    /// Fails (`false`) for a component that is not addable — see
+    /// [`is_addable`](Self::is_addable). Succeeds even if the entity already
+    /// holds one: the default replaces it, which is what "reset to a new one"
+    /// should do.
+    pub fn add_default(&self, world: &mut World, entity: EntityId) -> bool {
+        match self.default_insert {
+            Some(add) => {
+                add(world, entity);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// Every component type a project's editor knows, by name.
@@ -500,7 +546,32 @@ impl ComponentRegistry {
     /// the entry needs the type's identity *and* its field descriptors.
     /// Registering the same name again replaces the previous entry, so a
     /// re-registration (a hot-reloaded system) is idempotent.
+    ///
+    /// What this registers is not addable: the type is read, edited and
+    /// removed by name, but an "add component" menu will not offer it. Use
+    /// [`register_addable`](Self::register_addable) for a type an entity can
+    /// pick up as a fresh default.
     pub fn register<T>(&mut self) -> &mut Self
+    where
+        T: Any + ComponentInfo + Inspectable,
+    {
+        self.insert_entry::<T>(None)
+    }
+
+    /// Registers `T` the way [`register`](Self::register) does, plus a
+    /// default instance for [`add_default`](ComponentEntry::add_default).
+    ///
+    /// The `Default` bound is the whole difference: a menu can hand `T` to
+    /// an entity it has never held, and a command that adds one knows its
+    /// rollback is a plain remove.
+    pub fn register_addable<T>(&mut self) -> &mut Self
+    where
+        T: Any + ComponentInfo + Inspectable + Default,
+    {
+        self.insert_entry::<T>(Some(add_default::<T>))
+    }
+
+    fn insert_entry<T>(&mut self, default_insert: Option<DefaultInsertFn>) -> &mut Self
     where
         T: Any + ComponentInfo + Inspectable,
     {
@@ -512,6 +583,8 @@ impl ComponentRegistry {
                 fields: T::fields(),
                 read: read_component::<T>,
                 read_mut: read_component_mut::<T>,
+                remove: remove_component::<T>,
+                default_insert,
             },
         );
         self
@@ -557,9 +630,12 @@ impl ComponentRegistry {
     /// The engine's own components, ready to edit with.
     ///
     /// A game adds its types on top of this before opening a scene of theirs.
+    /// `Transform` is addable; `Parent` is not — hierarchy is built by
+    /// reparenting, never by handing an entity a bare parent id.
     pub fn engine_defaults() -> Self {
         let mut registry = Self::new();
-        registry.register::<Transform>();
+        registry.register_addable::<Transform>();
+        registry.register::<Parent>();
         registry
     }
 }
@@ -576,6 +652,16 @@ fn read_component_mut<T: Any>(world: &mut World, entity: EntityId) -> Option<&mu
     world
         .get_mut::<T>(entity)
         .map(|component| component as &mut dyn Any)
+}
+
+/// The `remove` closure registered for `T`.
+fn remove_component<T: Any>(world: &mut World, entity: EntityId) -> bool {
+    world.remove::<T>(entity).is_some()
+}
+
+/// The `default_insert` closure registered for an addable `T`.
+fn add_default<T: Default + 'static>(world: &mut World, entity: EntityId) {
+    world.insert(entity, T::default());
 }
 
 #[cfg(test)]
@@ -880,6 +966,61 @@ mod tests {
             FieldValue::Color(Rgba::rgb(0.25, 0.5, 1.0)).to_string(),
             "(0.25, 0.5, 1, 1)"
         );
+    }
+
+    #[test]
+    fn remove_takes_a_component_off_an_entity_by_name_alone() {
+        let registry = registry();
+        let entry = registry.get("Health").unwrap();
+        let mut world = world_with_health();
+        let entity = world.entities()[0];
+
+        assert!(entry.remove(&mut world, entity), "it was there");
+        assert!(!entry.has(&world, entity));
+        assert!(
+            !entry.remove(&mut world, entity),
+            "the second removal finds nothing, but is not an error"
+        );
+        assert!(
+            !world.entities().contains(&entity),
+            "with its last component gone there is nothing left to list, the same \
+             rule a scene save applies"
+        );
+    }
+
+    #[test]
+    fn only_addable_entries_hand_out_a_default() {
+        let registry = ComponentRegistry::engine_defaults();
+        let transform = registry.get("Transform").unwrap();
+        let parent = registry.get("Parent").unwrap();
+
+        assert!(transform.is_addable());
+        assert!(!parent.is_addable(), "hierarchy is built by reparenting");
+
+        let mut world = World::new();
+        let entity = world.spawn();
+        assert!(transform.add_default(&mut world, entity));
+        assert_eq!(world.get::<Transform>(entity), Some(&Transform::default()));
+        assert!(
+            !parent.add_default(&mut world, entity),
+            "an addable refusal changes nothing"
+        );
+        assert_eq!(world.get::<Parent>(entity), None);
+    }
+
+    #[test]
+    fn a_non_addable_type_can_still_be_read_and_removed() {
+        let registry = ComponentRegistry::engine_defaults();
+        let parent = registry.get("Parent").unwrap();
+        let mut world = World::new();
+        let entity = world.spawn();
+        world.insert(entity, crate::hierarchy::Parent { entity: 9 });
+
+        assert!(parent.has(&world, entity));
+        assert!(parent.read(&world, entity).is_some(), "it holds one");
+        assert_eq!(parent.fields.len(), 0, "the link itself is not a field");
+        assert!(parent.remove(&mut world, entity));
+        assert!(!parent.has(&world, entity));
     }
 
     #[test]

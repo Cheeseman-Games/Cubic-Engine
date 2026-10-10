@@ -5,12 +5,14 @@ use std::path::PathBuf;
 use egui_dock::DockState;
 
 use crate::dock;
+use crate::edit;
 use crate::panels;
 use crate::play;
 use crate::project;
 use crate::run;
-use crate::state::{EditorState, LogLevel, Pane, Pending, Selection};
+use crate::state::{EditorState, LogLevel, Pane, Pending, Selection, ensure_dock_panes};
 use crate::viewport::ViewportHost;
+use cubic_core::world::EntityId;
 
 /// Storage key for the persisted dock layout.
 const DOCK_LAYOUT_KEY: &str = "cubic_editor.dock_layout";
@@ -35,6 +37,7 @@ impl EditorApp {
             .and_then(|storage| eframe::get_value::<DockState<Pane>>(storage, DOCK_LAYOUT_KEY));
         if let Some(dock) = dock {
             state.dock = dock;
+            ensure_dock_panes(&mut state.dock);
             state.log(LogLevel::Info, "Restored the saved dock layout");
         }
         let root = storage
@@ -78,6 +81,43 @@ impl EditorApp {
         }
         if consumed(ctx, egui::KeyboardShortcut::new(ctrl, egui::Key::Q)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        // Undo and redo: Ctrl+Shift+Z redo is tested before Ctrl+Z undo so a
+        // shift held while pressing Z reaches redo, and Ctrl+Y is Win/Linux
+        // muscle memory for the same redo.
+        if consumed(
+            ctx,
+            egui::KeyboardShortcut::new(ctrl | egui::Modifiers::SHIFT, egui::Key::Z),
+        ) {
+            let outcome = edit::redo(&mut self.state);
+            self.state.report(outcome);
+        }
+        if consumed(ctx, egui::KeyboardShortcut::new(ctrl, egui::Key::Z)) {
+            let outcome = edit::undo(&mut self.state);
+            self.state.report(outcome);
+        }
+        if consumed(ctx, egui::KeyboardShortcut::new(ctrl, egui::Key::Y)) {
+            let outcome = edit::redo(&mut self.state);
+            self.state.report(outcome);
+        }
+        // Edit the selected entity: Delete drops it (and its subtree), Ctrl+D
+        // duplicates it. Both stay silent unless an entity is selected, so a
+        // stray key does not spam the console with refusals.
+        if matches!(self.state.selection, Selection::Entity(_))
+            && ctx.input(|i| i.key_pressed(egui::Key::Delete))
+        {
+            let id = match self.state.selection {
+                Selection::Entity(id) => id as EntityId,
+                _ => unreachable!("guarded above"),
+            };
+            let outcome = edit::delete_entity(&mut self.state, id);
+            self.state.report(outcome);
+        }
+        if consumed(ctx, egui::KeyboardShortcut::new(ctrl, egui::Key::D))
+            && let Selection::Entity(id) = self.state.selection
+        {
+            let outcome = edit::duplicate_entity(&mut self.state, id as EntityId);
+            self.state.report(outcome);
         }
         // Play transport. Plain function keys, so they do not collide with the
         // Ctrl-held file shortcuts above.

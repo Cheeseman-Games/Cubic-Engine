@@ -18,6 +18,9 @@ pub use crate::assets::{
     LoadedAsset, PendingAsset, TextureHandle,
 };
 pub use crate::components::{Transform, transform_direction, transform_point};
+pub use crate::hierarchy::{
+    Parent, children_of, descendants, is_ancestor, parent_map, parent_of, roots,
+};
 pub use crate::input::{FrameInput, Gamepad, InputState, KeyCode, MouseButton};
 #[cfg(feature = "manifest")]
 pub use crate::manifest::{ManifestError, ProjectManifest};

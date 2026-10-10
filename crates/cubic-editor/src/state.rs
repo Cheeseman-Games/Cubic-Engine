@@ -13,6 +13,8 @@ use cubic_core::scene::SceneRegistry;
 use cubic_core::world::World;
 use egui_dock::{DockState, NodeIndex};
 
+use crate::edit::EditHistory;
+use crate::hierarchy::HierarchyState;
 use crate::play::Play;
 use crate::preview::Preview;
 use crate::run::RunState;
@@ -22,6 +24,7 @@ use crate::tree::TreeState;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Pane {
     Project,
+    Hierarchy,
     Viewport,
     Inspector,
     Console,
@@ -32,6 +35,7 @@ impl Pane {
     pub fn title(self) -> &'static str {
         match self {
             Self::Project => "Project",
+            Self::Hierarchy => "Hierarchy",
             Self::Viewport => "Viewport",
             Self::Inspector => "Inspector",
             Self::Console => "Console",
@@ -122,6 +126,10 @@ pub struct EditorState {
     pub status: String,
     /// Project tree expansion and inline editors.
     pub tree: TreeState,
+    /// The scene's undo and redo stacks.
+    pub edits: EditHistory,
+    /// Which hierarchy subtrees are collapsed.
+    pub hierarchy: HierarchyState,
     /// The file open in the viewport preview, if any.
     pub preview: Option<Preview>,
     /// Play mode: the runtime and the snapshot Stop restores.
@@ -148,6 +156,8 @@ impl Default for EditorState {
             console_input: String::new(),
             status: String::new(),
             tree: TreeState::default(),
+            edits: EditHistory::new(),
+            hierarchy: HierarchyState::default(),
             preview: None,
             play: Play::default(),
             run: RunState::default(),
@@ -209,8 +219,8 @@ impl EditorState {
     }
 }
 
-/// The default four-pane layout: project on the left, viewport centre-top,
-/// inspector on the right, console along the bottom.
+/// The default five-pane layout: the hierarchy over the project on the left,
+/// viewport centre-top, inspector on the right, console along the bottom.
 ///
 /// Split `fraction`s describe the left/top child's share, so a fraction of
 /// `0.22` on `split_left` gives the new (project) pane 22% of the width and the
@@ -218,10 +228,36 @@ impl EditorState {
 fn default_dock() -> DockState<Pane> {
     let mut dock = DockState::new(vec![Pane::Viewport]);
     let tree = dock.main_surface_mut();
-    let [viewport, _project] = tree.split_left(NodeIndex::root(), 0.22, vec![Pane::Project]);
+    let [viewport, project] = tree.split_left(NodeIndex::root(), 0.22, vec![Pane::Project]);
+    let [_project, _hierarchy] = tree.split_above(project, 0.5, vec![Pane::Hierarchy]);
     let [viewport, _inspector] = tree.split_right(viewport, 0.80, vec![Pane::Inspector]);
     let [_viewport, _console] = tree.split_below(viewport, 0.72, vec![Pane::Console]);
     dock
+}
+
+/// A restored dock replaces a missing pane rather than losing it.
+///
+/// The saved layout comes from a build that may know fewer panes than this
+/// one — a renamed or added pane would otherwise have no home. Each missing
+/// pane is slipped back in next to where it used to be: the hierarchy joins
+/// the project's leaf, the project stays, and a pane with no signpost goes
+/// into the first leaf the dock still has.
+pub fn ensure_dock_panes(dock: &mut DockState<Pane>) {
+    ensure_one(dock, Pane::Hierarchy, Pane::Project);
+}
+
+/// Brings `wanted` back if a saved dock lacks it, parking it beside `roommate`.
+fn ensure_one(dock: &mut DockState<Pane>, wanted: Pane, roommate: Pane) {
+    if dock.find_main_surface_tab(&wanted).is_some() {
+        return;
+    }
+    if let Some((node, _)) = dock.find_main_surface_tab(&roommate)
+        && let Ok(leaf) = dock.main_surface_mut().leaf_mut(node)
+    {
+        leaf.tabs.insert(0, wanted);
+        return;
+    }
+    dock.push_to_first_leaf(wanted);
 }
 
 #[cfg(test)]
@@ -233,16 +269,37 @@ mod tests {
     }
 
     #[test]
-    fn default_dock_has_all_four_panes() {
+    fn default_dock_has_all_five_panes() {
         let tabs = tab_set(&EditorState::default());
         for expected in [
             Pane::Project,
+            Pane::Hierarchy,
             Pane::Viewport,
             Pane::Inspector,
             Pane::Console,
         ] {
             assert!(tabs.contains(&expected), "missing pane {expected:?}");
         }
+    }
+
+    #[test]
+    fn ensure_dock_panes_adds_a_missing_pane_next_to_its_roommate() {
+        let mut dock = DockState::new(vec![Pane::Project]);
+        ensure_dock_panes(&mut dock);
+        let tabs: Vec<Pane> = dock.iter_all_tabs().map(|(_, tab)| *tab).collect();
+        assert_eq!(tabs, vec![Pane::Hierarchy, Pane::Project]);
+    }
+
+    #[test]
+    fn ensure_dock_panes_leaves_a_complete_dock_alone() {
+        let mut dock = default_dock();
+        let before = dock
+            .iter_all_tabs()
+            .map(|(_, tab)| *tab)
+            .collect::<Vec<_>>();
+        ensure_dock_panes(&mut dock);
+        let after: Vec<Pane> = dock.iter_all_tabs().map(|(_, tab)| *tab).collect();
+        assert_eq!(before, after);
     }
 
     #[test]

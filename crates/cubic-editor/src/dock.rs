@@ -25,6 +25,7 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut Pane) {
         match *tab {
             Pane::Project => panels::project(ui, self.state),
+            Pane::Hierarchy => panels::hierarchy(ui, self.state),
             Pane::Viewport => panels::viewport(ui, self.state, self.viewport),
             Pane::Inspector => panels::inspector(ui, self.state),
             Pane::Console => panels::console(ui, self.state),

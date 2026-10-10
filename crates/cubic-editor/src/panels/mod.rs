@@ -2,6 +2,7 @@
 //! region of the editor chrome.
 
 mod console;
+mod hierarchy;
 mod inspector;
 mod menu;
 mod project;
@@ -10,6 +11,7 @@ mod toolbar;
 mod viewport;
 
 pub use console::console;
+pub use hierarchy::hierarchy;
 pub use inspector::inspector;
 pub use menu::menu_bar;
 pub use project::project;

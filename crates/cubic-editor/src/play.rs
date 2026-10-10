@@ -274,18 +274,27 @@ pub fn toggle_play(state: &mut EditorState) -> Result<String, String> {
         return Ok("resumed".to_owned());
     }
     state.play.play(&mut state.scene, &state.registry)?;
+    // A fresh run is a fresh session: the undo history described edits made on
+    // the world just snapshot, and undoing across a play/stop boundary would
+    // reach into a world that no longer exists.
+    state.edits.clear();
     Ok("playing".to_owned())
 }
 
 /// The transport's Step action.
 pub fn step_play(state: &mut EditorState) -> Result<String, String> {
+    let fresh = state.play.is_stopped();
     state.play.step(&mut state.scene, &state.registry)?;
+    if fresh {
+        state.edits.clear();
+    }
     Ok(format!("stepped to {} ticks", state.play.steps()))
 }
 
 /// The transport's Stop action.
 pub fn stop_play(state: &mut EditorState) -> Result<String, String> {
     state.play.stop(&mut state.scene, &state.registry)?;
+    state.edits.clear();
     Ok("stopped — the scene was restored".to_owned())
 }
 

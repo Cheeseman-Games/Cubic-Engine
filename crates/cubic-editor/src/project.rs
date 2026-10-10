@@ -58,6 +58,8 @@ pub fn open_project(state: &mut EditorState, path: &Path) -> Result<(), String> 
     state.preview = None;
     state.selection = Selection::None;
     state.dirty = false;
+    state.edits.clear();
+    state.hierarchy.clear();
     state.tree = TreeState::default();
     state.tree.expand(&root);
     state.log(
@@ -77,6 +79,8 @@ pub fn close_project(state: &mut EditorState) {
     state.preview = None;
     state.selection = Selection::None;
     state.dirty = false;
+    state.edits.clear();
+    state.hierarchy.clear();
     state.tree = TreeState::default();
     state.log(LogLevel::Info, "project closed");
 }
@@ -132,6 +136,8 @@ fn open_scene(state: &mut EditorState, path: PathBuf) {
         world: loaded.world,
     });
     state.dirty = false;
+    state.edits.clear();
+    state.hierarchy.clear();
     state.log(
         LogLevel::Info,
         format!("opened scene {}", shown(state, &path)),
@@ -346,6 +352,8 @@ fn delete_window(ctx: &egui::Context, state: &mut EditorState) {
     {
         state.scene = None;
         state.play.cancel();
+        state.edits.clear();
+        state.hierarchy.clear();
     }
     if state
         .preview

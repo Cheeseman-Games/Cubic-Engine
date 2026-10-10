@@ -14,6 +14,8 @@
 
 pub mod app;
 pub mod dock;
+pub mod edit;
+pub mod hierarchy;
 pub mod logging;
 pub mod panels;
 pub mod play;

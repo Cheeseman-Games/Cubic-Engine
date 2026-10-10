@@ -46,6 +46,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::components::Transform;
+use crate::hierarchy::Parent;
 use crate::world::{EntityId, World};
 
 /// How a component type travels between a `World` and a scene file.
@@ -122,7 +123,96 @@ impl SceneRegistry {
     pub fn engine_defaults() -> Self {
         let mut registry = Self::new();
         registry.register::<Transform>("Transform");
+        registry.register::<Parent>("Parent");
         registry
+    }
+
+    /// Every registered component `entity` holds, in name order.
+    ///
+    /// This is the editor's capture step: a command that is about to change an
+    /// entity takes one of these first, so its rollback can put the entity
+    /// back exactly as it was — including the components nothing in the
+    /// command touched.
+    pub fn snapshot_entity(
+        &self,
+        world: &World,
+        entity: EntityId,
+    ) -> Result<Vec<SceneComponent>, SceneError> {
+        let mut components = Vec::new();
+        for (name, codec) in &self.codecs {
+            match (codec.encode)(world, entity) {
+                None => {}
+                Some(Ok(value)) => components.push(SceneComponent {
+                    name: name.clone(),
+                    value,
+                }),
+                Some(Err(error)) => {
+                    return Err(SceneError::Component {
+                        entity,
+                        name: name.clone(),
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(components)
+    }
+
+    /// Whether `name` has a codec, i.e. whether a save would carry it.
+    pub fn has(&self, name: &str) -> bool {
+        self.codecs.contains_key(name)
+    }
+
+    /// One registered component of `entity`, captured as its saved text.
+    ///
+    /// `Ok(None)` means the registry has no codec under `name`, or the entity
+    /// does not hold that component; `Err` means the codec ran and the
+    /// component could not be encoded.
+    pub fn encode(
+        &self,
+        world: &World,
+        entity: EntityId,
+        name: &str,
+    ) -> Result<Option<SceneComponent>, SceneError> {
+        let Some(codec) = self.codecs.get(name) else {
+            return Ok(None);
+        };
+        match (codec.encode)(world, entity) {
+            None => Ok(None),
+            Some(Ok(value)) => Ok(Some(SceneComponent {
+                name: name.to_owned(),
+                value,
+            })),
+            Some(Err(error)) => Err(SceneError::Component {
+                entity,
+                name: name.to_owned(),
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    /// Pushes a captured component back into `entity`.
+    ///
+    /// The inverse of [`snapshot`](Self::snapshot_entity): an unknown `name`
+    /// is refused rather than silently ignored, because a rollback that drops
+    /// a component it promised to restore would corrupt the scene quietly.
+    pub fn insert(
+        &self,
+        world: &mut World,
+        entity: EntityId,
+        component: &SceneComponent,
+    ) -> Result<(), SceneError> {
+        let codec =
+            self.codecs
+                .get(&component.name)
+                .ok_or_else(|| SceneError::UnknownComponent {
+                    name: component.name.clone(),
+                })?;
+        (codec.insert)(world, entity, &component.value).map_err(|error| SceneError::Component {
+            entity,
+            name: component.name.clone(),
+            message: error.to_string(),
+        })
     }
 }
 
@@ -337,6 +427,8 @@ pub enum SceneError {
     Version { found: u32, supported: u32 },
     /// The file lists the same entity id twice.
     DuplicateEntity(EntityId),
+    /// A component name has no codec in this registry.
+    UnknownComponent { name: String },
     /// A component failed to encode or decode from/to its raw text.
     Component {
         entity: EntityId,
@@ -355,6 +447,9 @@ impl fmt::Display for SceneError {
                 "scene is format version {found}; this build reads up to version {supported}"
             ),
             Self::DuplicateEntity(id) => write!(f, "entity {id} appears more than once"),
+            Self::UnknownComponent { name } => {
+                write!(f, "component `{name}` is not registered for this project")
+            }
             Self::Component {
                 entity,
                 name,
@@ -463,6 +558,54 @@ mod tests {
             loaded.world.get::<Transform>(0),
             Some(&Transform::from_position(Vec2::new(1.0, 2.0)))
         );
+    }
+
+    #[test]
+    fn a_parent_link_saves_and_reloads() {
+        let mut world = World::new();
+        let body = world.spawn();
+        let head = world.spawn();
+        world.insert(body, Transform::default());
+        world.insert(head, Transform::default());
+        world.insert(head, Parent { entity: body });
+
+        let scene = Scene::from_world(&world, &registry()).unwrap();
+        let back: Scene = scene.to_text().unwrap().parse().unwrap();
+        assert_eq!(back, scene);
+
+        let world = back.to_world(&registry()).unwrap().world;
+        assert_eq!(world.get::<Parent>(head), Some(&Parent { entity: body }));
+    }
+
+    #[test]
+    fn a_snapshot_captures_what_an_entity_holds() {
+        let mut world = World::new();
+        let id = world.spawn();
+        world.insert(id, Transform::from_position(Vec2::new(1.0, 2.0)));
+        world.insert(id, Parent { entity: 7 });
+
+        let components = registry().snapshot_entity(&world, id).unwrap();
+        assert_eq!(
+            components
+                .iter()
+                .map(|component| component.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Parent", "Transform"]
+        );
+    }
+
+    #[test]
+    fn inserting_an_unknown_component_is_refused() {
+        let mut world = World::new();
+        let id = world.spawn();
+        let captured = SceneComponent {
+            name: "Loot".to_owned(),
+            value: RawValue::from_rust(&42_i32).unwrap(),
+        };
+        match registry().insert(&mut world, id, &captured) {
+            Err(SceneError::UnknownComponent { name }) => assert_eq!(name, "Loot"),
+            other => panic!("wrong result: {other:?}"),
+        }
     }
 
     #[test]
