@@ -8,11 +8,13 @@
 use std::path::{Path, PathBuf};
 
 use cubic_cli::Project;
+use cubic_core::assets::AssetServer;
 use cubic_core::reflect::ComponentRegistry;
 use cubic_core::scene::SceneRegistry;
 use cubic_core::world::World;
 use egui_dock::{DockState, NodeIndex};
 
+use crate::assets::AssetCatalog;
 use crate::edit::EditHistory;
 use crate::hierarchy::HierarchyState;
 use crate::play::Play;
@@ -112,6 +114,11 @@ pub struct EditorState {
     /// Every component type the inspector can address by name, with the field
     /// descriptors to read and edit one on a selected entity.
     pub components: ComponentRegistry,
+    /// The open project's assets, for the inspector's pickers to load a choice
+    /// through. `None` until a project opens.
+    pub assets: Option<AssetServer>,
+    /// The asset files the open project holds, for the pickers to list.
+    pub catalog: AssetCatalog,
     /// The current selection.
     pub selection: Selection,
     /// Whether the open scene has unsaved changes.
@@ -149,6 +156,8 @@ impl Default for EditorState {
             scene: None,
             registry: SceneRegistry::engine_defaults(),
             components: ComponentRegistry::engine_defaults(),
+            assets: None,
+            catalog: AssetCatalog::default(),
             selection: Selection::None,
             dirty: false,
             dock: default_dock(),

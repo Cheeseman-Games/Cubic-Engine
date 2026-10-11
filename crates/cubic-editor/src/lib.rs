@@ -13,6 +13,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 pub mod app;
+pub mod assets;
 pub mod dock;
 pub mod edit;
 pub mod hierarchy;

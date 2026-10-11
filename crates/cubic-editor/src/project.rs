@@ -11,8 +11,10 @@
 use std::path::{Path, PathBuf};
 
 use cubic_cli::{EngineSource, Project, scaffold};
+use cubic_core::assets::AssetServer;
 use cubic_core::scene::Scene;
 
+use crate::assets::AssetCatalog;
 use crate::preview::{self, PreviewKind};
 use crate::state::{EditorState, LogLevel, NewProjectForm, OpenScene, Pending, Selection};
 use crate::tree::{self, TreeState};
@@ -62,6 +64,9 @@ pub fn open_project(state: &mut EditorState, path: &Path) -> Result<(), String> 
     state.hierarchy.clear();
     state.tree = TreeState::default();
     state.tree.expand(&root);
+    // Point the inspector's asset pickers at the new project's files.
+    state.assets = Some(AssetServer::from_dir(root.clone()));
+    state.catalog = AssetCatalog::scan(&root);
     state.log(
         LogLevel::Info,
         format!("opened project `{name}` at {}", root.display()),
@@ -82,6 +87,8 @@ pub fn close_project(state: &mut EditorState) {
     state.edits.clear();
     state.hierarchy.clear();
     state.tree = TreeState::default();
+    state.assets = None;
+    state.catalog = AssetCatalog::default();
     state.log(LogLevel::Info, "project closed");
 }
 

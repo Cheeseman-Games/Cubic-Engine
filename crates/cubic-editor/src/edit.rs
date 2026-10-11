@@ -21,7 +21,7 @@
 
 use cubic_core::components::Transform;
 use cubic_core::hierarchy::{self, Parent};
-use cubic_core::reflect::ComponentRegistry;
+use cubic_core::reflect::{ComponentRegistry, FieldValue};
 use cubic_core::scene::{SceneComponent, SceneRegistry};
 use cubic_core::world::{EntityId, World};
 
@@ -70,6 +70,18 @@ pub enum EditCommand {
         parent: Option<EntityId>,
         previous: Option<EntityId>,
     },
+    /// One field of one component was edited in place.
+    ///
+    /// Both values travel with the command, so undo and redo are a write of the
+    /// other one — no reading the world back at undo time, when a later edit
+    /// may already have moved it.
+    SetField {
+        entity: EntityId,
+        component: &'static str,
+        field: &'static str,
+        before: FieldValue,
+        after: FieldValue,
+    },
     /// Changes that happen and come back together, in order.
     Batch(Vec<EditCommand>),
 }
@@ -85,6 +97,13 @@ impl EditCommand {
                 remove_one(ctx, *entity, component.name.as_str())
             }
             Self::Reparent { entity, parent, .. } => set_parent(ctx.world, *entity, *parent),
+            Self::SetField {
+                entity,
+                component,
+                field,
+                after,
+                ..
+            } => set_value(ctx, *entity, component, field, after),
             Self::Batch(commands) => {
                 for (index, command) in commands.iter().enumerate() {
                     if let Err(error) = command.apply(ctx) {
@@ -109,6 +128,13 @@ impl EditCommand {
             Self::Reparent {
                 entity, previous, ..
             } => set_parent(ctx.world, *entity, *previous),
+            Self::SetField {
+                entity,
+                component,
+                field,
+                before,
+                ..
+            } => set_value(ctx, *entity, component, field, before),
             Self::Batch(commands) => {
                 for (index, command) in commands.iter().rev().enumerate() {
                     if let Err(error) = command.rollback(ctx) {
@@ -133,6 +159,12 @@ impl EditCommand {
                 format!("remove {} from entity #{entity}", component.name)
             }
             Self::Reparent { entity, .. } => format!("reparent entity #{entity}"),
+            Self::SetField {
+                entity,
+                component,
+                field,
+                ..
+            } => format!("set {component}.{field} on entity #{entity}"),
             Self::Batch(commands) => match commands.first() {
                 Some(Self::Despawn { id, .. }) => format!("delete entity #{id} and its subtree"),
                 _ => format!("apply {} changes", commands.len()),
@@ -211,6 +243,32 @@ fn set_parent(world: &mut World, id: EntityId, parent: Option<EntityId>) -> Resu
     Ok(())
 }
 
+/// Writes `value` into one field of one component on `id`.
+///
+/// The field is looked up by name every time, so a command stays valid across a
+/// change to the registry as long as the names still resolve; a field the
+/// registry no longer describes is a clean error, not a panic.
+fn set_value(
+    ctx: &mut EditContext<'_>,
+    id: EntityId,
+    component: &str,
+    field: &str,
+    value: &FieldValue,
+) -> Result<(), String> {
+    let entry = ctx
+        .components
+        .get(component)
+        .ok_or_else(|| format!("component `{component}` is not registered"))?;
+    let descriptor = entry
+        .field(field)
+        .ok_or_else(|| format!("`{component}` has no field `{field}`"))?;
+    match entry.set_field(ctx.world, id, descriptor, value) {
+        Ok(Some(())) => Ok(()),
+        Ok(None) => Err(format!("entity #{id} has no {component}")),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// The undo and redo stacks, oldest first.
 #[derive(Default)]
 pub struct EditHistory {
@@ -224,12 +282,51 @@ impl EditHistory {
     }
 
     /// Remembers `command`, discarding any redo branch.
+    ///
+    /// A run of edits to the same field — a drag, or typing into a text box —
+    /// folds into the step before it, so a single gesture is a single undo. Any
+    /// other command, and any edit to a different field, ends the run.
     fn record(&mut self, command: EditCommand) {
         self.redo.clear();
-        self.undo.push(command);
-        if self.undo.len() > CAPACITY {
-            self.undo.remove(0);
+        if !self.coalesce(&command) {
+            self.undo.push(command);
+            if self.undo.len() > CAPACITY {
+                self.undo.remove(0);
+            }
         }
+    }
+
+    /// Folds `command` into the newest undo step when both write the same field
+    /// of the same component on the same entity, reporting whether it did.
+    fn coalesce(&mut self, command: &EditCommand) -> bool {
+        let EditCommand::SetField {
+            entity,
+            component,
+            field,
+            after,
+            ..
+        } = command
+        else {
+            return false;
+        };
+        let Some(EditCommand::SetField {
+            entity: previous_entity,
+            component: previous_component,
+            field: previous_field,
+            after: previous_after,
+            ..
+        }) = self.undo.last_mut()
+        else {
+            return false;
+        };
+        if *previous_entity != *entity
+            || *previous_component != *component
+            || *previous_field != *field
+        {
+            return false;
+        }
+        *previous_after = after.clone();
+        true
     }
 
     /// Forgets everything, for when the world underneath is replaced.
@@ -534,6 +631,56 @@ pub fn reparent(
     })
 }
 
+/// Writes one field of one component on an entity, as the inspector does.
+///
+/// The value is checked against the field's kind by the same reflection path a
+/// loaded scene uses, so a widget that hands back the wrong shape is refused
+/// here rather than corrupting the world. A write that changes nothing is
+/// reported, not recorded: clicking into a field and leaving it alone leaves no
+/// undo step behind.
+pub fn set_field(
+    state: &mut EditorState,
+    entity: EntityId,
+    component: &'static str,
+    field: &'static str,
+    value: FieldValue,
+) -> Result<String, String> {
+    let command = {
+        let open = state
+            .scene
+            .as_ref()
+            .ok_or_else(|| "no scene is open".to_owned())?;
+        if !open.world.entities().contains(&entity) {
+            return Err(format!("entity #{entity} is not in the scene"));
+        }
+        let Some(entry) = state.components.get(component) else {
+            return Err(format!("`{component}` is not a known component"));
+        };
+        let Some(descriptor) = entry.field(field) else {
+            return Err(format!("`{component}` has no field `{field}`"));
+        };
+        let Some(any) = entry.read(&open.world, entity) else {
+            return Err(format!("entity #{entity} has no {component}"));
+        };
+        let before = descriptor.get(any);
+        if before == value {
+            return Ok(format!("{component}.{field} is already {before}"));
+        }
+        EditCommand::SetField {
+            entity,
+            component,
+            field,
+            before,
+            after: value,
+        }
+    };
+
+    apply_now(state, &command)?;
+    state.edits.record(command);
+    state.dirty = true;
+    Ok(format!("set {component}.{field} on entity #{entity}"))
+}
+
 /// Reverses the most recent change.
 pub fn undo(state: &mut EditorState) -> Result<String, String> {
     let Some(command) = state.edits.pop_undo() else {
@@ -578,6 +725,7 @@ mod tests {
 
     use super::*;
     use crate::state::OpenScene;
+    use cubic_core::math::Vec2;
 
     fn state_with_scene() -> EditorState {
         EditorState {
@@ -799,6 +947,110 @@ mod tests {
         assert!(
             !state.edits.can_redo(),
             "recording a change drops the redo stack"
+        );
+    }
+
+    fn position(state: &EditorState, id: EntityId) -> Vec2 {
+        state
+            .scene
+            .as_ref()
+            .expect("scene")
+            .world
+            .get::<Transform>(id)
+            .expect("transform")
+            .position
+    }
+
+    #[test]
+    fn editing_a_field_applies_live_and_is_reversible() {
+        let mut state = state_with_scene();
+        add_entity(&mut state, None).unwrap();
+        assert_eq!(
+            set_field(
+                &mut state,
+                0,
+                "Transform",
+                "position",
+                FieldValue::Vec2(Vec2::new(3.0, 4.0)),
+            )
+            .unwrap(),
+            "set Transform.position on entity #0"
+        );
+        assert_eq!(position(&state, 0), Vec2::new(3.0, 4.0));
+        assert!(state.dirty);
+
+        undo(&mut state).unwrap();
+        assert_eq!(
+            position(&state, 0),
+            Vec2::ZERO,
+            "undo restores the old value"
+        );
+
+        redo(&mut state).unwrap();
+        assert_eq!(position(&state, 0), Vec2::new(3.0, 4.0));
+    }
+
+    #[test]
+    fn a_run_of_edits_to_one_field_is_a_single_undo_step() {
+        let mut state = state_with_scene();
+        add_entity(&mut state, None).unwrap();
+        let before = state.edits.depth();
+        for x in [1.0, 2.0, 3.0] {
+            set_field(
+                &mut state,
+                0,
+                "Transform",
+                "position",
+                FieldValue::Vec2(Vec2::new(x, 0.0)),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            state.edits.depth(),
+            (before.0 + 1, 0),
+            "a drag folds into one step"
+        );
+
+        undo(&mut state).unwrap();
+        assert_eq!(
+            position(&state, 0),
+            Vec2::ZERO,
+            "one undo returns to before the whole run"
+        );
+
+        // A read-only field written with the same value records nothing.
+        let depth = state.edits.depth();
+        assert!(
+            set_field(&mut state, 0, "Transform", "rotation", FieldValue::F32(0.0),)
+                .unwrap()
+                .contains("already")
+        );
+        assert_eq!(state.edits.depth(), depth, "a no-op leaves no undo step");
+    }
+
+    #[test]
+    fn editing_refuses_unknown_components_fields_entities_and_kinds() {
+        let mut state = state_with_scene();
+        add_entity(&mut state, None).unwrap();
+
+        assert!(
+            set_field(&mut state, 0, "Nope", "x", FieldValue::F32(1.0))
+                .unwrap_err()
+                .contains("not a known component")
+        );
+        assert!(
+            set_field(&mut state, 0, "Transform", "nope", FieldValue::F32(1.0))
+                .unwrap_err()
+                .contains("no field")
+        );
+        assert!(
+            set_field(&mut state, 9, "Transform", "rotation", FieldValue::F32(1.0))
+                .unwrap_err()
+                .contains("not in the scene")
+        );
+        assert!(
+            set_field(&mut state, 0, "Transform", "position", FieldValue::F32(1.0)).is_err(),
+            "a wrong-kind value is refused by the reflection layer"
         );
     }
 }
