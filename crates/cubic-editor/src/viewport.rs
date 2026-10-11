@@ -12,11 +12,17 @@
 //! Screen coordinates throughout are the offscreen target's pixels, y
 //! downward — the 2D pipeline's own convention — so nothing here re-derives an
 //! orientation the renderer already fixed.
+//!
+//! Beyond framing the scene, this module owns the canvas furniture the editor
+//! draws over it: an adaptive grid, the scene's bounds, and the selection
+//! outline ([`build_scene`]), plus [`pick`], which turns a click back into the
+//! entity under it so the viewport can drive the selection the hierarchy and
+//! inspector panels already share.
 
 use cubic_core::components::Transform;
-use cubic_core::math::Vec2;
+use cubic_core::math::{Rect, Vec2};
 use cubic_core::render::{DrawList, Renderer, Rgba};
-use cubic_core::world::World;
+use cubic_core::world::{EntityId, World};
 use cubic_render::offscreen::Offscreen2d;
 use cubic_render::text::TextError;
 use eframe::egui_wgpu::RenderState;
@@ -25,9 +31,22 @@ use eframe::egui_wgpu::RenderState;
 /// color when the scene list carries no `Clear` of its own.
 const BACKDROP: Rgba = Rgba::rgb(0.07, 0.09, 0.13);
 
+/// Fine grid lines, one per [`grid_step`], faint enough to read as texture
+/// rather than furniture.
+const GRID: Rgba = Rgba::rgb(0.13, 0.15, 0.20);
+
 /// The world-origin crosshair, drawn in target pixels so it stays a hairline
-/// at any zoom.
+/// at any zoom. Brighter than [`GRID`], so the axes read through it.
 const AXIS: Rgba = Rgba::rgb(0.34, 0.37, 0.44);
+
+/// The box around everything the scene holds, so an entity placed off in the
+/// void still shows where the scene's mass sits.
+const BOUNDS: Rgba = Rgba::rgb(0.40, 0.32, 0.55);
+
+/// Selection highlight: the fill of the selected entity's placeholder and the
+/// outline drawn around it.
+const MARKER_SELECTED: Rgba = Rgba::rgb(0.93, 0.94, 0.98);
+const SELECTION: Rgba = Rgba::rgb(1.0, 0.72, 0.25);
 
 /// Entity placeholder: scenes carry only transforms so far, so each entity is
 /// drawn as this much world units through its transform — big enough to see
@@ -102,6 +121,32 @@ impl ViewportCamera {
         self.center += (anchor - view * 0.5) * (1.0 / self.zoom - 1.0 / zoom);
         self.zoom = zoom;
     }
+}
+
+/// The spacing, in world units, between grid lines at `zoom`.
+///
+/// A power-of-two multiple of one world unit, chosen so the on-screen spacing
+/// stays in a readable band: coarse enough not to crowd as the camera pulls
+/// back, fine enough to place a detail as it pushes in. The band keeps the
+/// line count proportional to the viewport rather than to the zoom, so a scene
+/// framed from far away draws no more lines than one seen up close.
+///
+/// A zoom that is not a finite positive scale leaves the grid at its base
+/// spacing rather than looping on a degenerate value.
+pub fn grid_step(zoom: f32) -> f32 {
+    const BASE: f32 = 1.0;
+    const MIN_PIXELS: f32 = 10.0;
+    if !zoom.is_finite() || zoom <= 0.0 {
+        return BASE;
+    }
+    let mut step = BASE;
+    while step * zoom < MIN_PIXELS {
+        step *= 2.0;
+    }
+    while step * zoom > MIN_PIXELS * 2.0 && step > BASE / 1024.0 {
+        step *= 0.5;
+    }
+    step
 }
 
 /// The viewport panel's engine side: eframe's render state, the offscreen
@@ -193,38 +238,67 @@ impl ViewportHost {
         self.texture
     }
 
-    /// Draw `world` through the camera into the target.
+    /// Draw `world` through the camera into the target, with `selected`
+    /// highlighted.
     ///
     /// Called after [`prepare`](Self::prepare) returned `Some` — the panel's
     /// order — which is the invariant behind the panic.
-    pub fn draw_scene(&mut self, world: &World) -> Result<(), TextError> {
+    pub fn draw_scene(
+        &mut self,
+        world: &World,
+        selected: Option<EntityId>,
+    ) -> Result<(), TextError> {
         let target = self
             .target
             .as_mut()
             .expect("draw_scene called before prepare");
         let [width, height] = target.size();
         let view = Vec2::new(width as f32, height as f32);
-        build_scene(&mut self.list, world, &self.camera, view);
+        build_scene(&mut self.list, world, &self.camera, view, selected);
         target.render(&self.list, BACKDROP)
     }
 }
 
-/// Fill `list` with the scene as the viewport should show it: backdrop,
-/// origin crosshair, one placeholder per transform-bearing entity.
+/// Fill `list` with the scene as the viewport should show it: backdrop, grid,
+/// origin axes, the scene's bounds, one placeholder per transform-bearing
+/// entity, and an outline around `selected`.
 ///
 /// Everything is mapped through `camera` into the `view` rectangle's pixels,
 /// so the list is ready to hand to a renderer sized the same. Entities whose
 /// placeholder falls entirely outside the view are dropped — a scene can hold
 /// thousands of them, and the panel resizes every frame anyway.
-pub fn build_scene(list: &mut DrawList, world: &World, camera: &ViewportCamera, view: Vec2) {
+pub fn build_scene(
+    list: &mut DrawList,
+    world: &World,
+    camera: &ViewportCamera,
+    view: Vec2,
+    selected: Option<EntityId>,
+) {
     list.reset();
     list.clear(BACKDROP);
+    draw_grid(list, camera, view);
 
+    // The origin axes, drawn only when the origin sits in view so a camera
+    // panned far away is not crossed by wire it cannot see the ends of.
     let origin = camera.to_screen(Vec2::ZERO, view);
-    list.fill_rect(0.0, origin.y - 0.5, view.x, 1.0, AXIS);
-    list.fill_rect(origin.x - 0.5, 0.0, 1.0, view.y, AXIS);
+    if (0.0..=view.x).contains(&origin.x) {
+        list.fill_rect(origin.x.round() - 0.5, 0.0, 1.0, view.y, AXIS);
+    }
+    if (0.0..=view.y).contains(&origin.y) {
+        list.fill_rect(0.0, origin.y.round() - 0.5, view.x, 1.0, AXIS);
+    }
 
-    for (_, transform) in world.iter::<Transform>() {
+    if let Some(bounds) = scene_bounds(world) {
+        let min = camera.to_screen(Vec2::new(bounds.x, bounds.y), view);
+        let size = Vec2::new(bounds.w, bounds.h) * camera.zoom;
+        stroke_rect(list, min.x, min.y, size.x, size.y, 1.0, BOUNDS);
+    }
+
+    // The selected entity's placeholder is remembered rather than outlined as
+    // it is drawn, so the outline lands on top of every marker, not just the
+    // ones painted after it.
+    let mut selected_bounds: Option<(f32, f32, f32, f32)> = None;
+    for (id, transform) in world.iter::<Transform>() {
         let bounds = transform.aabb(Vec2::splat(MARKER_SIZE));
         let min = camera.to_screen(Vec2::new(bounds.x, bounds.y), view);
         let size = Vec2::new(bounds.w, bounds.h) * camera.zoom;
@@ -233,8 +307,89 @@ pub fn build_scene(list: &mut DrawList, world: &World, camera: &ViewportCamera, 
         if off_view {
             continue;
         }
-        list.fill_rect(min.x, min.y, size.x, size.y, MARKER);
+        if selected == Some(id) {
+            list.fill_rect(min.x, min.y, size.x, size.y, MARKER_SELECTED);
+            selected_bounds = Some((min.x, min.y, size.x, size.y));
+        } else {
+            list.fill_rect(min.x, min.y, size.x, size.y, MARKER);
+        }
     }
+    if let Some((x, y, w, h)) = selected_bounds {
+        stroke_rect(list, x, y, w, h, 2.0, SELECTION);
+    }
+}
+
+/// Draw an adaptive grid of one-pixel lines over the view.
+///
+/// Vertical and horizontal lines are laid at every multiple of
+/// [`grid_step`](grid_step) inside the visible world rectangle. A degenerate
+/// camera or a collapsed view draws nothing rather than looping on an
+/// unbounded range.
+fn draw_grid(list: &mut DrawList, camera: &ViewportCamera, view: Vec2) {
+    if !camera.zoom.is_finite() || camera.zoom <= 0.0 || view.x <= 0.0 || view.y <= 0.0 {
+        return;
+    }
+    let step = grid_step(camera.zoom);
+    let min = camera.to_world(Vec2::ZERO, view);
+    let max = camera.to_world(view, view);
+
+    let first_x = (min.x / step).ceil() * step;
+    let mut x = first_x;
+    while x <= max.x {
+        let sx = camera.to_screen(Vec2::new(x, 0.0), view).x.round();
+        list.fill_rect(sx - 0.5, 0.0, 1.0, view.y, GRID);
+        x += step;
+    }
+    let first_y = (min.y / step).ceil() * step;
+    let mut y = first_y;
+    while y <= max.y {
+        let sy = camera.to_screen(Vec2::new(0.0, y), view).y.round();
+        list.fill_rect(0.0, sy - 0.5, view.x, 1.0, GRID);
+        y += step;
+    }
+}
+
+/// The smallest box covering every entity's placeholder, or `None` for an
+/// empty scene.
+fn scene_bounds(world: &World) -> Option<Rect> {
+    let mut bounds: Option<Rect> = None;
+    for (_, transform) in world.iter::<Transform>() {
+        let aabb = transform.aabb(Vec2::splat(MARKER_SIZE));
+        bounds = Some(match bounds {
+            Some(bounds) => bounds.union(&aabb),
+            None => aabb,
+        });
+    }
+    bounds
+}
+
+/// Draw a rectangle's border as four filled bars, the only stroke the command
+/// model offers.
+fn stroke_rect(list: &mut DrawList, x: f32, y: f32, w: f32, h: f32, thickness: f32, color: Rgba) {
+    list.fill_rect(x, y, w, thickness, color);
+    list.fill_rect(x, y + h - thickness, w, thickness, color);
+    list.fill_rect(x, y, thickness, h, color);
+    list.fill_rect(x + w - thickness, y, thickness, h, color);
+}
+
+/// The entity whose placeholder covers `screen` (a target pixel), if any.
+///
+/// "Topmost" is the highest id: entities are drawn in id order, so the last
+/// one painted — the one the click should land on — is the greatest id whose
+/// box contains the point. A click that hits nothing picks nothing, so the
+/// caller can clear the selection rather than leave a stale one.
+pub fn pick(world: &World, camera: &ViewportCamera, view: Vec2, screen: Vec2) -> Option<EntityId> {
+    let point = camera.to_world(screen, view);
+    let mut hit: Option<EntityId> = None;
+    for (id, transform) in world.iter::<Transform>() {
+        if transform
+            .aabb(Vec2::splat(MARKER_SIZE))
+            .contains(point.x, point.y)
+        {
+            hit = Some(hit.map_or(id, |best| best.max(id)));
+        }
+    }
+    hit
 }
 
 #[cfg(test)]
@@ -255,6 +410,24 @@ mod tests {
             .iter()
             .filter_map(|command| match command {
                 DrawCommand::Rect { x, y, w, h, .. } => Some((*x, *y, *w, *h)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The rectangles drawn in exactly `color`, for asserting on one layer of
+    /// the canvas (grid, marker, outline) without counting the others.
+    fn rects_of(list: &DrawList, color: Rgba) -> Vec<(f32, f32, f32, f32)> {
+        list.commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Rect {
+                    x,
+                    y,
+                    w,
+                    h,
+                    color: drawn,
+                } if *drawn == color => Some((*x, *y, *w, *h)),
                 _ => None,
             })
             .collect()
@@ -339,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn a_scene_draws_its_backdrop_crosshair_and_entities() {
+    fn a_scene_draws_its_backdrop_grid_axes_and_entities() {
         let mut world = World::new();
         let entity = world.spawn();
         world.insert(entity, Transform::from_position(Vec2::new(10.0, 5.0)));
@@ -347,23 +520,25 @@ mod tests {
         let camera = ViewportCamera::default();
         let view = Vec2::new(100.0, 100.0);
         let mut list = DrawList::new();
-        build_scene(&mut list, &world, &camera, view);
+        build_scene(&mut list, &world, &camera, view, None);
 
         assert!(
             matches!(list.commands.first(), Some(DrawCommand::Clear(_))),
             "the scene starts with the backdrop"
         );
-        // The crosshair (two hairlines through the centre) plus the marker.
-        let drawn = rects(&list);
-        assert_eq!(drawn.len(), 3, "crosshair and one marker: {drawn:?}");
+        assert!(!rects_of(&list, GRID).is_empty(), "the grid is drawn");
+        // The origin sits at the view's centre, so both axes cross it.
+        assert_eq!(
+            rects_of(&list, AXIS).len(),
+            2,
+            "two axes through the origin"
+        );
 
         // The marker is the 16-unit box around (10, 5), in view pixels.
-        let marker = drawn
-            .iter()
-            .find(|(_, _, w, _)| (*w - 16.0).abs() < 1e-4)
-            .expect("the entity's marker");
+        let markers = rects_of(&list, MARKER);
+        assert_eq!(markers.len(), 1, "one marker: {markers:?}");
         assert_close(
-            Vec2::new(marker.0, marker.1),
+            Vec2::new(markers[0].0, markers[0].1),
             Vec2::new(52.0, 47.0),
             "marker top-left",
         );
@@ -381,9 +556,12 @@ mod tests {
         };
         let view = Vec2::new(100.0, 100.0);
         let mut list = DrawList::new();
-        build_scene(&mut list, &world, &camera, view);
+        build_scene(&mut list, &world, &camera, view, None);
 
-        assert_eq!(rects(&list).len(), 2, "only the crosshair is in view");
+        assert!(rects_of(&list, MARKER).is_empty(), "no marker in view");
+        // The origin is far off to the left, so the vertical axis is skipped;
+        // the horizontal one (defined by a y still on-screen) remains.
+        assert_eq!(rects_of(&list, AXIS).len(), 1, "only the horizontal axis");
     }
 
     #[test]
@@ -394,10 +572,124 @@ mod tests {
 
         let mut list = DrawList::new();
         list.fill_rect(1.0, 1.0, 1.0, 1.0, Rgba::rgb(1.0, 1.0, 1.0));
-        build_scene(&mut list, &world, &camera, view);
-        build_scene(&mut list, &world, &camera, view);
+        build_scene(&mut list, &world, &camera, view, None);
+        let once = rects(&list).len();
+        build_scene(&mut list, &world, &camera, view, None);
 
-        // Two frames of crosshair, not three: the stale rect was reset away.
-        assert_eq!(rects(&list).len(), 2);
+        assert_eq!(rects(&list).len(), once, "the stale frame was reset away");
+    }
+
+    #[test]
+    fn the_selected_entity_is_filled_and_outlined() {
+        let mut world = World::new();
+        let entity = world.spawn();
+        world.insert(entity, Transform::from_position(Vec2::new(10.0, 5.0)));
+
+        let camera = ViewportCamera::default();
+        let view = Vec2::new(100.0, 100.0);
+        let mut list = DrawList::new();
+        build_scene(&mut list, &world, &camera, view, Some(entity));
+
+        assert!(
+            rects_of(&list, MARKER).is_empty(),
+            "the selected marker is not drawn in the plain color"
+        );
+        assert_eq!(
+            rects_of(&list, MARKER_SELECTED).len(),
+            1,
+            "filled highlight"
+        );
+        assert_eq!(
+            rects_of(&list, SELECTION).len(),
+            4,
+            "an outline is four bars"
+        );
+    }
+
+    #[test]
+    fn the_scene_bounds_cover_every_entity() {
+        let mut world = World::new();
+        for position in [Vec2::new(-50.0, 0.0), Vec2::new(50.0, 20.0)] {
+            let id = world.spawn();
+            world.insert(id, Transform::from_position(position));
+        }
+
+        let camera = ViewportCamera::default();
+        let view = Vec2::new(400.0, 400.0);
+        let mut list = DrawList::new();
+        build_scene(&mut list, &world, &camera, view, None);
+
+        let bars = rects_of(&list, BOUNDS);
+        assert_eq!(bars.len(), 4, "the bounds are an outline of four bars");
+        // The two markers span x from -58 to 58 and y from -8 to 28 in world
+        // units; the bounds' top bar reaches both extremes.
+        let (left, right, top, bottom) = bars.iter().fold(
+            (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
+            |(l, r, t, b), &(x, y, w, h)| (l.min(x), r.max(x + w), t.min(y), b.max(y + h)),
+        );
+        let min = camera.to_screen(Vec2::new(-58.0, -8.0), view);
+        let max = camera.to_screen(Vec2::new(58.0, 28.0), view);
+        assert_close(Vec2::new(left, top), min, "bounds min");
+        assert_close(Vec2::new(right, bottom), max, "bounds max");
+    }
+
+    #[test]
+    fn grid_step_keeps_on_screen_spacing_in_a_readable_band() {
+        for zoom in [0.05, 0.2, 1.0, 4.0, 32.0] {
+            let spacing = grid_step(zoom) * zoom;
+            assert!(
+                (10.0..=20.0).contains(&spacing),
+                "zoom {zoom} gives {spacing}px spacing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_degenerate_zoom_does_not_loop_or_divide_by_zero() {
+        assert_eq!(grid_step(0.0), 1.0);
+        assert_eq!(grid_step(f32::NAN), 1.0);
+
+        // A zero-zoom camera would otherwise produce an infinite world range;
+        // the grid bows out and the rest of the scene still builds.
+        let mut world = World::new();
+        let id = world.spawn();
+        world.insert(id, Transform::default());
+        let camera = ViewportCamera {
+            center: Vec2::ZERO,
+            zoom: 0.0,
+        };
+        let mut list = DrawList::new();
+        build_scene(&mut list, &world, &camera, Vec2::new(100.0, 100.0), None);
+        assert!(rects_of(&list, GRID).is_empty(), "no grid at a dead zoom");
+    }
+
+    #[test]
+    fn clicking_an_entity_picks_the_topmost_of_those_under_the_pointer() {
+        let mut world = World::new();
+        let lower = world.spawn();
+        world.insert(lower, Transform::from_position(Vec2::ZERO));
+        let upper = world.spawn();
+        world.insert(upper, Transform::from_position(Vec2::new(2.0, 0.0)));
+
+        let camera = ViewportCamera::default();
+        let view = Vec2::new(200.0, 200.0);
+        // A point inside both 16-unit boxes: the higher id is drawn last, so it
+        // wins the click.
+        let screen = camera.to_screen(Vec2::new(2.0, 0.0), view);
+
+        assert_eq!(pick(&world, &camera, view, screen), Some(upper));
+    }
+
+    #[test]
+    fn clicking_empty_space_picks_nothing() {
+        let mut world = World::new();
+        let id = world.spawn();
+        world.insert(id, Transform::from_position(Vec2::ZERO));
+
+        let camera = ViewportCamera::default();
+        let view = Vec2::new(200.0, 200.0);
+        let screen = camera.to_screen(Vec2::new(500.0, 500.0), view);
+
+        assert_eq!(pick(&world, &camera, view, screen), None);
     }
 }

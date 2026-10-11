@@ -2,9 +2,10 @@
 //!
 //! With a scene open, the pane paints the engine's offscreen target (built and
 //! fed by [`crate::viewport::ViewportHost`]) as an image and steers its camera
-//! from the pointer: middle-drag pans, wheel or pinch zooms toward the cursor.
-//! With no scene — or no GPU render state to draw into — it shows the
-//! checkerboard placeholder instead.
+//! from the pointer: middle-drag pans, wheel or pinch zooms toward the cursor,
+//! and a primary click picks the entity under the pointer into the same
+//! selection the hierarchy and inspector panels share. With no scene — or no
+//! GPU render state to draw into — it shows the checkerboard placeholder.
 
 use egui::Color32;
 use egui::Pos2;
@@ -13,9 +14,10 @@ use egui::Sense;
 use egui::Vec2;
 
 use cubic_core::math;
+use cubic_core::world::EntityId;
 
 use crate::preview::{Preview, PreviewKind};
-use crate::state::{EditorState, LogLevel};
+use crate::state::{EditorState, LogLevel, Selection};
 use crate::viewport::ViewportHost;
 
 /// Checkerboard cell edge, in points.
@@ -31,15 +33,15 @@ pub fn viewport(ui: &mut egui::Ui, state: &mut EditorState, host: &mut ViewportH
         preview(ui, state);
         return;
     }
-    let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::drag());
+    let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     if !ui.is_rect_visible(rect) {
         return;
     }
 
-    let Some(scene) = state.scene.as_ref() else {
+    if state.scene.is_none() {
         placeholder(ui, rect, state);
         return;
-    };
+    }
 
     // The target tracks the panel at the display's pixel density, so the
     // image is sharp and the camera's pixel space is the target's own.
@@ -55,7 +57,11 @@ pub fn viewport(ui: &mut egui::Ui, state: &mut EditorState, host: &mut ViewportH
         return;
     };
 
-    let drawn = host.draw_scene(&scene.world);
+    let selected = selected_entity(state);
+    let drawn = {
+        let world = &state.scene.as_ref().expect("checked above").world;
+        host.draw_scene(world, selected)
+    };
     let painter = ui.painter_at(rect);
     painter.image(
         texture,
@@ -68,6 +74,51 @@ pub fn viewport(ui: &mut egui::Ui, state: &mut EditorState, host: &mut ViewportH
     if let Err(error) = drawn {
         state.log(LogLevel::Error, format!("viewport: {error}"));
     }
+
+    pick_click(state, host, &response, rect, size, ppp);
+}
+
+/// The selected entity, when the selection names one.
+fn selected_entity(state: &EditorState) -> Option<EntityId> {
+    match state.selection {
+        Selection::Entity(id) => Some(id as EntityId),
+        _ => None,
+    }
+}
+
+/// Route a primary click into the shared selection: the entity under the
+/// pointer becomes selected, and a click on empty space clears the selection.
+///
+/// The pointer is in points over the panel; the camera's screen space is the
+/// target's pixels, so the density scale closes the gap — the same conversion
+/// the camera controls use.
+fn pick_click(
+    state: &mut EditorState,
+    host: &ViewportHost,
+    response: &egui::Response,
+    rect: Rect,
+    size: [u32; 2],
+    ppp: f32,
+) {
+    if !response.clicked() {
+        return;
+    }
+    let Some(pointer) = response.interact_pointer_pos() else {
+        return;
+    };
+    let local = pointer - rect.min;
+    let screen = math::Vec2::new(local.x * ppp, local.y * ppp);
+    let view = math::Vec2::new(size[0] as f32, size[1] as f32);
+    let hit = {
+        let Some(scene) = state.scene.as_ref() else {
+            return;
+        };
+        crate::viewport::pick(&scene.world, host.camera(), view, screen)
+    };
+    state.selection = match hit {
+        Some(id) => Selection::Entity(id as u64),
+        None => Selection::None,
+    };
 }
 
 /// Route the viewport rect's pointer events into camera moves. Input is read
