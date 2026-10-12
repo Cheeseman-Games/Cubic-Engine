@@ -16,6 +16,7 @@ pub mod app;
 pub mod assets;
 pub mod dock;
 pub mod edit;
+pub mod gizmo;
 pub mod hierarchy;
 pub mod logging;
 pub mod panels;

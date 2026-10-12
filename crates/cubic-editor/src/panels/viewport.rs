@@ -13,9 +13,13 @@ use egui::Rect;
 use egui::Sense;
 use egui::Vec2;
 
+use cubic_core::components::Transform;
 use cubic_core::math;
+use cubic_core::reflect::FieldValue;
 use cubic_core::world::EntityId;
 
+use crate::edit;
+use crate::gizmo::{self, Handle};
 use crate::preview::{Preview, PreviewKind};
 use crate::state::{EditorState, LogLevel, Selection};
 use crate::viewport::ViewportHost;
@@ -58,9 +62,12 @@ pub fn viewport(ui: &mut egui::Ui, state: &mut EditorState, host: &mut ViewportH
     };
 
     let selected = selected_entity(state);
+    // The gizmo is an editing tool: while play runs the scene belongs to the
+    // simulation, so the handles are hidden and their gestures ignored.
+    let mode = (!state.play.is_active()).then_some(state.gizmo.mode);
     let drawn = {
         let world = &state.scene.as_ref().expect("checked above").world;
-        host.draw_scene(world, selected)
+        host.draw_scene(world, selected, mode)
     };
     let painter = ui.painter_at(rect);
     painter.image(
@@ -75,7 +82,11 @@ pub fn viewport(ui: &mut egui::Ui, state: &mut EditorState, host: &mut ViewportH
         state.log(LogLevel::Error, format!("viewport: {error}"));
     }
 
-    pick_click(state, host, &response, rect, size, ppp);
+    // A gizmo drag owns the pointer for its whole gesture; only a click the
+    // handles did not take falls through to selection.
+    if !gizmo_input(state, host, &response, rect, size, ppp) {
+        pick_click(state, host, &response, rect, size, ppp);
+    }
 }
 
 /// The selected entity, when the selection names one.
@@ -91,7 +102,8 @@ fn selected_entity(state: &EditorState) -> Option<EntityId> {
 ///
 /// The pointer is in points over the panel; the camera's screen space is the
 /// target's pixels, so the density scale closes the gap — the same conversion
-/// the camera controls use.
+/// the camera controls use. A click that lands on a gizmo handle is left to the
+/// gizmo, so a bare click on a handle neither clears nor moves the selection.
 fn pick_click(
     state: &mut EditorState,
     host: &ViewportHost,
@@ -106,9 +118,16 @@ fn pick_click(
     let Some(pointer) = response.interact_pointer_pos() else {
         return;
     };
-    let local = pointer - rect.min;
-    let screen = math::Vec2::new(local.x * ppp, local.y * ppp);
-    let view = math::Vec2::new(size[0] as f32, size[1] as f32);
+    let screen = local_screen(pointer, rect, ppp);
+    let view = view_size(size);
+    if !state.play.is_active()
+        && let Some(entity) = selected_entity(state)
+        && let Some(scene) = state.scene.as_ref()
+        && let Some(transform) = scene.world.get::<Transform>(entity)
+        && gizmo::hit(transform, state.gizmo.mode, host.camera(), view, screen).is_some()
+    {
+        return;
+    }
     let hit = {
         let Some(scene) = state.scene.as_ref() else {
             return;
@@ -148,15 +167,133 @@ fn camera_input(
         return;
     };
     let factor = (scroll.y * ZOOM_SPEED).exp() * pinch;
-    let view = math::Vec2::new(size[0] as f32, size[1] as f32);
     // egui's pointer is in points over the rect; the camera's screen space is
     // the target's pixels, so the density scale closes the gap.
-    let anchor = anchor - rect.min;
-    host.camera_mut().zoom_at(
-        factor,
-        math::Vec2::new(anchor.x * ppp, anchor.y * ppp),
-        view,
+    host.camera_mut()
+        .zoom_at(factor, local_screen(anchor, rect, ppp), view_size(size));
+}
+
+/// A pointer in points over the panel as a target pixel.
+///
+/// egui's pointer is in points; the camera's screen space is the target's own
+/// pixels, so the display density closes the gap. Every conversion in this
+/// panel goes through here.
+fn local_screen(pointer: Pos2, rect: Rect, ppp: f32) -> math::Vec2 {
+    let local = pointer - rect.min;
+    math::Vec2::new(local.x * ppp, local.y * ppp)
+}
+
+/// The offscreen target's size in pixels, as the camera's screen space.
+fn view_size(size: [u32; 2]) -> math::Vec2 {
+    math::Vec2::new(size[0] as f32, size[1] as f32)
+}
+
+/// Route primary-button motion into the gizmo, and report whether the gesture
+/// belonged to it.
+///
+/// A drag is begun on a handle of the active mode and then owned until the
+/// button comes up: every frame of it recomputes the transform from where the
+/// gesture started (carried in the [`gizmo::Drag`]) and writes the one field the
+/// handle changes, which the edit history folds into a single undo step.
+fn gizmo_input(
+    state: &mut EditorState,
+    host: &mut ViewportHost,
+    response: &egui::Response,
+    rect: Rect,
+    size: [u32; 2],
+    ppp: f32,
+) -> bool {
+    // No scene, or the simulation has the world: nothing for a handle to move.
+    if state.scene.is_none() || state.play.is_active() {
+        host.clear_drag();
+        return false;
+    }
+
+    if let Some(active) = host.drag().copied() {
+        if response.dragged_by(egui::PointerButton::Primary) {
+            if let Some(pointer) = response.interact_pointer_pos() {
+                apply_gizmo_drag(state, host, &active, pointer, rect, size, ppp);
+            }
+        } else {
+            host.clear_drag();
+        }
+        return true;
+    }
+
+    if !response.drag_started_by(egui::PointerButton::Primary) {
+        return false;
+    }
+    let Some(pointer) = response.interact_pointer_pos() else {
+        return false;
+    };
+    let Some(active) = begin_gizmo_drag(state, host, pointer, rect, size, ppp) else {
+        return false;
+    };
+    host.begin_drag(active);
+    // The first frame of the gesture is already at the pointer; writing it now
+    // starts the drag's undo step on the frame it began.
+    apply_gizmo_drag(state, host, &active, pointer, rect, size, ppp);
+    true
+}
+
+/// Hit-test the active mode's handles for a drag beginning at `pointer`.
+fn begin_gizmo_drag(
+    state: &EditorState,
+    host: &ViewportHost,
+    pointer: Pos2,
+    rect: Rect,
+    size: [u32; 2],
+    ppp: f32,
+) -> Option<gizmo::Drag> {
+    let entity = selected_entity(state)?;
+    let scene = state.scene.as_ref()?;
+    let transform = *scene.world.get::<Transform>(entity)?;
+    let screen = local_screen(pointer, rect, ppp);
+    let view = view_size(size);
+    let handle = gizmo::hit(&transform, state.gizmo.mode, host.camera(), view, screen)?;
+    Some(gizmo::Drag {
+        entity,
+        handle,
+        start: transform,
+        start_world: host.camera().to_world(screen, view),
+    })
+}
+
+/// Continue `active`'s drag to `pointer`, writing the changed field through the
+/// edit queue.
+fn apply_gizmo_drag(
+    state: &mut EditorState,
+    host: &ViewportHost,
+    active: &gizmo::Drag,
+    pointer: Pos2,
+    rect: Rect,
+    size: [u32; 2],
+    ppp: f32,
+) {
+    let view = view_size(size);
+    let world = host
+        .camera()
+        .to_world(local_screen(pointer, rect, ppp), view);
+    let next = gizmo::drag(
+        active.handle,
+        &active.start,
+        active.start_world,
+        world,
+        state.gizmo.snap,
+        host.camera().zoom,
     );
+    let (field, value) = match active.handle {
+        Handle::Move | Handle::MoveX | Handle::MoveY => {
+            ("position", FieldValue::Vec2(next.position))
+        }
+        Handle::Rotate => ("rotation", FieldValue::F32(next.rotation)),
+        Handle::Scale(_) => ("scale", FieldValue::Vec2(next.scale)),
+    };
+    // A success is silent: a drag writes once a frame, and each line would
+    // flood the console the same way an inspector drag would.
+    if let Err(error) = edit::set_field(state, active.entity, "Transform", field, value) {
+        state.log(LogLevel::Error, error);
+    }
 }
 
 /// The no-scene, no-GPU state: the checkerboard with whatever is known about

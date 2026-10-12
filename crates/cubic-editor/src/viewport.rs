@@ -27,6 +27,8 @@ use cubic_render::offscreen::Offscreen2d;
 use cubic_render::text::TextError;
 use eframe::egui_wgpu::RenderState;
 
+use crate::gizmo::{self, GizmoMode};
+
 /// Backdrop: what the panel shows before anything else draws, and the load-op
 /// color when the scene list carries no `Clear` of its own.
 const BACKDROP: Rgba = Rgba::rgb(0.07, 0.09, 0.13);
@@ -50,8 +52,9 @@ const SELECTION: Rgba = Rgba::rgb(1.0, 0.72, 0.25);
 
 /// Entity placeholder: scenes carry only transforms so far, so each entity is
 /// drawn as this much world units through its transform — big enough to see
-/// where it is, and it scales with the entity like a sprite would.
-const MARKER_SIZE: f32 = 16.0;
+/// where it is, and it scales with the entity like a sprite would. The gizmo's
+/// box uses it too, so a handle sits on the marker it belongs to.
+pub(crate) const MARKER_SIZE: f32 = 16.0;
 const MARKER: Rgba = Rgba::rgb(0.36, 0.68, 0.86);
 
 /// Which world point sits at the centre of the viewport, and how many target
@@ -161,6 +164,9 @@ pub struct ViewportHost {
     /// in place instead of allocating a new one.
     texture: Option<egui::TextureId>,
     camera: ViewportCamera,
+    /// The gizmo drag the pointer is holding, if any. Transient like the
+    /// camera: it never outlives the gesture and is not saved anywhere.
+    drag: Option<gizmo::Drag>,
     /// Reused frame to frame; [`build_scene`] resets it.
     list: DrawList,
 }
@@ -178,6 +184,7 @@ impl ViewportHost {
             target: None,
             texture: None,
             camera: ViewportCamera::default(),
+            drag: None,
             list: DrawList::new(),
         }
     }
@@ -188,6 +195,22 @@ impl ViewportHost {
 
     pub fn camera_mut(&mut self) -> &mut ViewportCamera {
         &mut self.camera
+    }
+
+    /// The gizmo drag the pointer is holding, if any.
+    pub fn drag(&self) -> Option<&gizmo::Drag> {
+        self.drag.as_ref()
+    }
+
+    /// Begin a gizmo drag; the panel carries it until the pointer is released.
+    pub fn begin_drag(&mut self, drag: gizmo::Drag) {
+        self.drag = Some(drag);
+    }
+
+    /// End the gizmo drag (on release, or when the scene or mode changes under
+    /// it).
+    pub fn clear_drag(&mut self) {
+        self.drag = None;
     }
 
     /// Adopt the render state eframe offers this frame, if any. Offered every
@@ -239,7 +262,8 @@ impl ViewportHost {
     }
 
     /// Draw `world` through the camera into the target, with `selected`
-    /// highlighted.
+    /// highlighted and, when `mode` names one and the entity is selected, its
+    /// transform gizmo drawn on top.
     ///
     /// Called after [`prepare`](Self::prepare) returned `Some` — the panel's
     /// order — which is the invariant behind the panic.
@@ -247,6 +271,7 @@ impl ViewportHost {
         &mut self,
         world: &World,
         selected: Option<EntityId>,
+        mode: Option<GizmoMode>,
     ) -> Result<(), TextError> {
         let target = self
             .target
@@ -255,6 +280,12 @@ impl ViewportHost {
         let [width, height] = target.size();
         let view = Vec2::new(width as f32, height as f32);
         build_scene(&mut self.list, world, &self.camera, view, selected);
+        if let Some(mode) = mode
+            && let Some(id) = selected
+            && let Some(transform) = world.get::<Transform>(id)
+        {
+            gizmo::draw(&mut self.list, transform, mode, &self.camera, view);
+        }
         target.render(&self.list, BACKDROP)
     }
 }

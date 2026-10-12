@@ -9,6 +9,7 @@
 
 use egui::{Button, Panel};
 
+use crate::gizmo::{GizmoMode, Snap};
 use crate::play;
 use crate::run;
 use crate::state::EditorState;
@@ -60,6 +61,32 @@ pub fn toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
                 state.play.steps(),
                 state.play.elapsed(),
             ));
+
+            // The viewport gizmo: which handles a selection shows, and how a
+            // drag snaps. A segmented choice each, so the active one is visible
+            // at a glance.
+            ui.separator();
+            ui.label("Gizmo");
+            for mode in GizmoMode::ALL {
+                if ui
+                    .selectable_label(state.gizmo.mode == mode, mode.title())
+                    .on_hover_text("Draw this transform handle on the selection")
+                    .clicked()
+                {
+                    state.gizmo.mode = mode;
+                }
+            }
+            ui.separator();
+            ui.label("Snap");
+            for snap in Snap::ALL {
+                if ui
+                    .selectable_label(state.gizmo.snap == snap, snap.title())
+                    .on_hover_text("Quantize a drag to the grid or to whole pixels")
+                    .clicked()
+                {
+                    state.gizmo.snap = snap;
+                }
+            }
 
             // The placeholder Run: build the open project and launch it as its
             // own process, streaming cargo's output to the console. Later this

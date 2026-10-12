@@ -16,6 +16,7 @@ use egui_dock::{DockState, NodeIndex};
 
 use crate::assets::AssetCatalog;
 use crate::edit::EditHistory;
+use crate::gizmo::GizmoSettings;
 use crate::hierarchy::HierarchyState;
 use crate::play::Play;
 use crate::preview::Preview;
@@ -135,6 +136,8 @@ pub struct EditorState {
     pub tree: TreeState,
     /// The scene's undo and redo stacks.
     pub edits: EditHistory,
+    /// The viewport gizmo's mode and snapping.
+    pub gizmo: GizmoSettings,
     /// Which hierarchy subtrees are collapsed.
     pub hierarchy: HierarchyState,
     /// The file open in the viewport preview, if any.
@@ -166,6 +169,7 @@ impl Default for EditorState {
             status: String::new(),
             tree: TreeState::default(),
             edits: EditHistory::new(),
+            gizmo: GizmoSettings::default(),
             hierarchy: HierarchyState::default(),
             preview: None,
             play: Play::default(),
