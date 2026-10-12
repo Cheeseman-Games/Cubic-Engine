@@ -1,6 +1,7 @@
 //! Plain-function panels: each `fn(&mut egui::Ui, &mut EditorState)` owns one
 //! region of the editor chrome.
 
+mod assets;
 mod console;
 mod hierarchy;
 mod inspector;
@@ -10,6 +11,7 @@ mod status;
 mod toolbar;
 mod viewport;
 
+pub use assets::assets;
 pub use console::console;
 pub use hierarchy::hierarchy;
 pub use inspector::inspector;

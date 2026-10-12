@@ -42,7 +42,7 @@ pub fn classify(path: &Path) -> Option<OpenKind> {
         "rsn" => Some(OpenKind::Scene),
         "png" | "jpg" | "jpeg" => Some(OpenKind::Image),
         "rs" | "toml" | "txt" | "md" | "json" | "ron" | "yml" | "yaml" | "wgsl" | "glsl"
-        | "cfg" | "ini" | "lock" => Some(OpenKind::Text),
+        | "cfg" | "ini" | "lock" | "prefab" => Some(OpenKind::Text),
         _ => None,
     }
 }
@@ -67,6 +67,9 @@ pub fn open_project(state: &mut EditorState, path: &Path) -> Result<(), String> 
     // Point the inspector's asset pickers at the new project's files.
     state.assets = Some(AssetServer::from_dir(root.clone()));
     state.catalog = AssetCatalog::scan(&root);
+    // Thumbnails and a half-typed prefab name belong to the project that closed.
+    state.thumbnails.clear();
+    state.prefab_name.clear();
     state.log(
         LogLevel::Info,
         format!("opened project `{name}` at {}", root.display()),
@@ -89,6 +92,8 @@ pub fn close_project(state: &mut EditorState) {
     state.tree = TreeState::default();
     state.assets = None;
     state.catalog = AssetCatalog::default();
+    state.thumbnails.clear();
+    state.prefab_name.clear();
     state.log(LogLevel::Info, "project closed");
 }
 
@@ -420,6 +425,7 @@ mod tests {
             ("src/game.rs", Some(OpenKind::Text)),
             ("game.toml", Some(OpenKind::Text)),
             ("Cargo.lock", Some(OpenKind::Text)),
+            ("assets/prefabs/crate.prefab", Some(OpenKind::Text)),
             ("README", Some(OpenKind::Text)),
             ("assets/model.mesh", None),
             ("weird.RSN", Some(OpenKind::Scene)),

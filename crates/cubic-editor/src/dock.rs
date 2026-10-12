@@ -28,6 +28,7 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
             Pane::Hierarchy => panels::hierarchy(ui, self.state),
             Pane::Viewport => panels::viewport(ui, self.state, self.viewport),
             Pane::Inspector => panels::inspector(ui, self.state),
+            Pane::Assets => panels::assets(ui, self.state),
             Pane::Console => panels::console(ui, self.state),
         }
     }
@@ -37,7 +38,7 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
     }
 
     fn allowed_in_windows(&self, _tab: &mut Pane) -> bool {
-        // The chrome is a fixed four-pane layout; floating windows stay off.
+        // The chrome is a fixed six-pane layout; floating windows stay off.
         false
     }
 

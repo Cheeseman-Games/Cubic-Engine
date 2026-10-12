@@ -10,8 +10,9 @@
 //! model; disable it (`--no-default-features`) for a headless,
 //! dependency-free sim core. The `manifest` feature adds the `game.toml`
 //! project manifest on top of it, the `scene` feature adds the `.rsn`
-//! `Scene` model for loading and saving levels, and the `reflect` feature
-//! adds component reflection for the editor's inspector.
+//! `Scene` model for loading and saving levels and the `Prefab` fragment on
+//! top of it, and the `reflect` feature adds component reflection for the
+//! editor's inspector.
 //!
 //! Game crates import [`prelude`] (or `cubic_render::prelude`, which adds the
 //! runtime) rather than naming modules.
@@ -23,6 +24,8 @@ pub mod input;
 #[cfg(feature = "manifest")]
 pub mod manifest;
 pub mod math;
+#[cfg(feature = "scene")]
+pub mod prefab;
 #[cfg(feature = "reflect")]
 pub mod reflect;
 #[cfg(feature = "rendering")]

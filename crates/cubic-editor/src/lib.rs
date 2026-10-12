@@ -21,10 +21,12 @@ pub mod hierarchy;
 pub mod logging;
 pub mod panels;
 pub mod play;
+pub mod prefab;
 pub mod preview;
 pub mod project;
 pub mod run;
 pub mod state;
+pub mod thumbnails;
 pub mod tree;
 pub mod viewport;
 

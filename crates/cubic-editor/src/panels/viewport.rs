@@ -20,6 +20,7 @@ use cubic_core::world::EntityId;
 
 use crate::edit;
 use crate::gizmo::{self, Handle};
+use crate::prefab::PrefabDrag;
 use crate::preview::{Preview, PreviewKind};
 use crate::state::{EditorState, LogLevel, Selection};
 use crate::viewport::ViewportHost;
@@ -55,6 +56,7 @@ pub fn viewport(ui: &mut egui::Ui, state: &mut EditorState, host: &mut ViewportH
         (rect.height() * ppp).round().max(1.0) as u32,
     ];
     camera_input(ui, host, &response, rect, size, ppp);
+    prefab_drop(ui, state, host, &response, rect, size, ppp);
 
     let Some(texture) = host.prepare(size) else {
         placeholder(ui, rect, state);
@@ -171,6 +173,38 @@ fn camera_input(
     // the target's pixels, so the density scale closes the gap.
     host.camera_mut()
         .zoom_at(factor, local_screen(anchor, rect, ppp), view_size(size));
+}
+
+/// Stamps a prefab dropped from the asset panel into the open scene.
+///
+/// The payload was released over the viewport rect, so the pointer becomes the
+/// fragment's anchor and the whole placement is one undo step (see
+/// [`crate::prefab::instantiate`]). Guarded on play mode, because a drop edits
+/// a scene that belongs to the simulation while it runs.
+fn prefab_drop(
+    ui: &egui::Ui,
+    state: &mut EditorState,
+    host: &ViewportHost,
+    response: &egui::Response,
+    rect: Rect,
+    size: [u32; 2],
+    ppp: f32,
+) {
+    if state.play.is_active() {
+        return;
+    }
+    let Some(payload) = response.dnd_release_payload::<PrefabDrag>() else {
+        return;
+    };
+    let at = ui
+        .ctx()
+        .input(|input| input.pointer.interact_pos())
+        .map(|pointer| {
+            host.camera()
+                .to_world(local_screen(pointer, rect, ppp), view_size(size))
+        });
+    let outcome = crate::prefab::instantiate(state, &payload.path, at);
+    state.report(outcome);
 }
 
 /// A pointer in points over the panel as a target pixel.

@@ -69,6 +69,26 @@ impl AssetCatalog {
             .iter()
             .filter(move |entry| kind == AssetKind::Bytes || entry.kind == kind)
     }
+
+    /// The assets whose file extension is `extension`, case-insensitively.
+    ///
+    /// The asset panel lists files that are not an [`AssetKind`] — prefabs, say
+    /// — so it filters by extension rather than by the kind a picker wants.
+    pub fn ending_with(&self, extension: &str) -> impl Iterator<Item = &AssetEntry> {
+        let extension = extension.to_ascii_lowercase();
+        self.entries
+            .iter()
+            .filter(move |entry| extension_of(&entry.path) == extension)
+    }
+}
+
+/// A path's extension, lowercased, or `""` when it has none.
+fn extension_of(path: &str) -> String {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
 /// Walks `directory`, appending every file under it to `entries`.
@@ -134,5 +154,26 @@ mod tests {
     fn a_project_without_assets_scans_empty() {
         let root = Scratch::new("asset-none");
         assert!(AssetCatalog::scan(&root.path).is_empty());
+    }
+
+    #[test]
+    fn ending_with_lists_a_file_extension_case_insensitively() {
+        let root = Scratch::new("asset-ending");
+        fs::create_dir_all(root.join("assets/prefabs")).expect("dirs");
+        fs::write(root.join("assets/prefabs/crate.prefab"), b"x").expect("prefab");
+        fs::write(root.join("assets/prefabs/Pair.PREFAB"), b"y").expect("prefab");
+        fs::write(root.join("assets/hero.png"), b"z").expect("png");
+
+        let catalog = AssetCatalog::scan(&root.path);
+        let paths: Vec<&str> = catalog
+            .ending_with("prefab")
+            .map(|entry| entry.path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            ["assets/prefabs/Pair.PREFAB", "assets/prefabs/crate.prefab"],
+            "both prefabs match, and nothing else does"
+        );
+        assert_eq!(catalog.ending_with("mesh").count(), 0);
     }
 }

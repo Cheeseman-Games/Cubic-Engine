@@ -281,12 +281,13 @@ impl EditHistory {
         Self::default()
     }
 
-    /// Remembers `command`, discarding any redo branch.
+    /// Remembers a change that has already been applied to the world,
+    /// discarding any redo branch.
     ///
     /// A run of edits to the same field — a drag, or typing into a text box —
     /// folds into the step before it, so a single gesture is a single undo. Any
     /// other command, and any edit to a different field, ends the run.
-    fn record(&mut self, command: EditCommand) {
+    pub fn record(&mut self, command: EditCommand) {
         self.redo.clear();
         if !self.coalesce(&command) {
             self.undo.push(command);
