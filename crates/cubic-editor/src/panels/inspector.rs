@@ -25,6 +25,12 @@ use cubic_core::world::EntityId;
 use crate::edit;
 use crate::state::{EditorState, LogLevel, Selection};
 
+/// The component that carries a sprite's draw layer.
+const SPRITE: &str = "Sprite";
+
+/// The field on [`SPRITE`] that orders the draws.
+const LAYER: &str = "layer";
+
 /// One change a widget reported, applied after the frame's rows are drawn.
 enum Edit {
     /// A field took a new value.
@@ -111,9 +117,50 @@ fn draw_entity(ui: &mut egui::Ui, state: &EditorState, entity: EntityId) -> Vec<
                         }
                     });
                 }
+                if entry.name == SPRITE
+                    && let Some(field) = entry.field(LAYER)
+                    && let FieldValue::I32(layer) = field.get(component)
+                {
+                    layer_order_row(ui, entity, layer, &mut edits);
+                }
             });
     }
     edits
+}
+
+/// A pair of buttons that nudge a sprite's draw layer, one undoable step each.
+///
+/// The viewport sorts sprites by layer, so a click moves this sprite exactly one
+/// band towards the front or the back; the `layer` field's own drag-scrub is
+/// still there for a bigger jump.
+fn layer_order_row(ui: &mut egui::Ui, entity: EntityId, layer: i32, edits: &mut Vec<Edit>) {
+    ui.horizontal(|ui| {
+        ui.label("draw order");
+        if ui
+            .button("▲")
+            .on_hover_text("Draw one layer nearer the front")
+            .clicked()
+        {
+            edits.push(Edit::Set {
+                entity,
+                component: SPRITE,
+                field: LAYER,
+                value: FieldValue::I32(layer.saturating_add(1)),
+            });
+        }
+        if ui
+            .button("▼")
+            .on_hover_text("Draw one layer nearer the back")
+            .clicked()
+        {
+            edits.push(Edit::Set {
+                entity,
+                component: SPRITE,
+                field: LAYER,
+                value: FieldValue::I32(layer.saturating_sub(1)),
+            });
+        }
+    });
 }
 
 /// The widget for one field, returning an [`Edit`] only when it changed.
@@ -320,19 +367,10 @@ fn load_asset(
     field: &'static str,
     path: &str,
 ) -> Result<String, String> {
-    let loaded = match state.assets.as_mut() {
-        None => Err("no project is open — there are no assets to pick".to_owned()),
-        Some(server) => match server.load(path) {
-            Ok(handle) => {
-                // The editor drains no imports: the bytes the server staged are
-                // all a field needs, since the handle is what a scene stores.
-                server.drain_pending();
-                Ok(handle)
-            }
-            Err(error) => Err(error.to_string()),
-        },
+    let handle = match state.assets.as_mut() {
+        None => return Err("no project is open — there are no assets to pick".to_owned()),
+        Some(server) => server.load(path).map_err(|error| error.to_string())?,
     };
-    let handle = loaded?;
     edit::set_field(state, entity, component, field, FieldValue::Asset(handle))
 }
 

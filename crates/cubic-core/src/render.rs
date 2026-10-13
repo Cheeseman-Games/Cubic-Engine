@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use crate::assets::TextureHandle;
 
 /// RGBA color, components normalized to 0.0..=1.0.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rgba {
     pub r: f32,

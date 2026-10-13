@@ -19,8 +19,9 @@
 //! ever holds components the registry knows (a loaded scene skips the rest),
 //! so emptying is complete.
 
-use cubic_core::components::Transform;
+use cubic_core::components::{Sprite, Transform};
 use cubic_core::hierarchy::{self, Parent};
+use cubic_core::math::Vec2;
 use cubic_core::reflect::{ComponentRegistry, FieldValue};
 use cubic_core::scene::{SceneComponent, SceneRegistry};
 use cubic_core::world::{EntityId, World};
@@ -29,6 +30,9 @@ use crate::state::{EditorState, Selection};
 
 /// How many changes are remembered before the oldest is forgotten.
 const CAPACITY: usize = 256;
+
+/// The name `Sprite` is registered under in both registries.
+const SPRITE: &str = "Sprite";
 
 /// The registries and world a command acts on.
 pub struct EditContext<'a> {
@@ -64,6 +68,15 @@ pub enum EditCommand {
         entity: EntityId,
         component: SceneComponent,
     },
+    /// A whole component was replaced — or added, when `previous` is `None`.
+    ///
+    /// Adding a `Sprite` is a component write like any other, so it travels
+    /// with the component it replaced and one command is one undo step.
+    SetComponent {
+        entity: EntityId,
+        component: SceneComponent,
+        previous: Option<SceneComponent>,
+    },
     /// An entity's parent link changed.
     Reparent {
         entity: EntityId,
@@ -96,6 +109,9 @@ impl EditCommand {
             Self::RemoveComponent { entity, component } => {
                 remove_one(ctx, *entity, component.name.as_str())
             }
+            Self::SetComponent {
+                entity, component, ..
+            } => insert_one(ctx, *entity, component),
             Self::Reparent { entity, parent, .. } => set_parent(ctx.world, *entity, *parent),
             Self::SetField {
                 entity,
@@ -125,6 +141,14 @@ impl EditCommand {
             Self::Despawn { id, components } => insert_all(ctx, *id, components),
             Self::AddComponent { entity, name } => remove_one(ctx, *entity, name),
             Self::RemoveComponent { entity, component } => insert_one(ctx, *entity, component),
+            Self::SetComponent {
+                entity,
+                component,
+                previous,
+            } => match previous {
+                Some(previous) => insert_one(ctx, *entity, previous),
+                None => remove_one(ctx, *entity, component.name.as_str()),
+            },
             Self::Reparent {
                 entity, previous, ..
             } => set_parent(ctx.world, *entity, *previous),
@@ -157,6 +181,11 @@ impl EditCommand {
             Self::AddComponent { entity, name } => format!("add {name} to entity #{entity}"),
             Self::RemoveComponent { entity, component } => {
                 format!("remove {} from entity #{entity}", component.name)
+            }
+            Self::SetComponent {
+                entity, component, ..
+            } => {
+                format!("set {} on entity #{entity}", component.name)
             }
             Self::Reparent { entity, .. } => format!("reparent entity #{entity}"),
             Self::SetField {
@@ -682,6 +711,76 @@ pub fn set_field(
     Ok(format!("set {component}.{field} on entity #{entity}"))
 }
 
+/// Gives `entity` the sprite `sprite`, replacing any sprite it already had.
+///
+/// A texture dropped from the asset panel lands here: the panel has already
+/// loaded the texture and sized the sprite, and the whole change is one undo
+/// step — the sprite it replaced (or its absence) travels with the command.
+pub fn set_sprite(
+    state: &mut EditorState,
+    entity: EntityId,
+    sprite: Sprite,
+) -> Result<String, String> {
+    let (component, previous) = {
+        let open = state
+            .scene
+            .as_mut()
+            .ok_or_else(|| "no scene is open".to_owned())?;
+        if !open.world.entities().contains(&entity) {
+            return Err(format!("entity #{entity} is not in the scene"));
+        }
+        let previous = state
+            .registry
+            .encode(&open.world, entity, SPRITE)
+            .map_err(|error| error.to_string())?;
+        open.world.insert(entity, sprite);
+        let component = state
+            .registry
+            .encode(&open.world, entity, SPRITE)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("`{SPRITE}` is not saved by this project's scene format"))?;
+        (component, previous)
+    };
+
+    state.edits.record(EditCommand::SetComponent {
+        entity,
+        component,
+        previous,
+    });
+    state.dirty = true;
+    Ok(format!("set a sprite on entity #{entity}"))
+}
+
+/// Adds a new entity carrying `sprite`, positioned at `at`, and selects it.
+///
+/// An empty-space drop lands here: the entity gets the engine's usual
+/// `Transform`, so it can be moved by the gizmo like any other.
+pub fn add_sprite_entity(
+    state: &mut EditorState,
+    sprite: Sprite,
+    at: Vec2,
+) -> Result<String, String> {
+    let (id, command) = {
+        let open = state
+            .scene
+            .as_mut()
+            .ok_or_else(|| "no scene is open".to_owned())?;
+        let id = open.world.spawn();
+        open.world.insert(id, Transform::from_position(at));
+        open.world.insert(id, sprite);
+        let components = state
+            .registry
+            .snapshot_entity(&open.world, id)
+            .map_err(|error| error.to_string())?;
+        (id, EditCommand::Spawn { id, components })
+    };
+
+    state.edits.record(command);
+    state.dirty = true;
+    state.selection = Selection::Entity(id as u64);
+    Ok(format!("added sprite entity #{id}"))
+}
+
 /// Reverses the most recent change.
 pub fn undo(state: &mut EditorState) -> Result<String, String> {
     let Some(command) = state.edits.pop_undo() else {
@@ -722,11 +821,27 @@ pub fn redo(state: &mut EditorState) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
     use std::path::PathBuf;
 
     use super::*;
     use crate::state::OpenScene;
+    use cubic_core::assets::TextureHandle;
     use cubic_core::math::Vec2;
+
+    fn texture(id: u64) -> TextureHandle {
+        TextureHandle::new(NonZeroU64::new(id).expect("a test uses non-zero ids"))
+    }
+
+    fn sprite_of(state: &EditorState, id: EntityId) -> Option<Sprite> {
+        state
+            .scene
+            .as_ref()
+            .expect("scene")
+            .world
+            .get::<Sprite>(id)
+            .copied()
+    }
 
     fn state_with_scene() -> EditorState {
         EditorState {
@@ -1053,5 +1168,73 @@ mod tests {
             set_field(&mut state, 0, "Transform", "position", FieldValue::F32(1.0)).is_err(),
             "a wrong-kind value is refused by the reflection layer"
         );
+    }
+
+    #[test]
+    fn dropping_a_sprite_on_an_entity_is_reversible() {
+        let mut state = state_with_scene();
+        add_entity(&mut state, None).unwrap();
+        let sprite = Sprite::new(texture(7)).with_layer(2);
+
+        assert_eq!(
+            set_sprite(&mut state, 0, sprite).unwrap(),
+            "set a sprite on entity #0"
+        );
+        assert_eq!(sprite_of(&state, 0), Some(sprite));
+        assert!(state.dirty);
+
+        undo(&mut state).unwrap();
+        assert_eq!(sprite_of(&state, 0), None, "undo removes the added sprite");
+
+        redo(&mut state).unwrap();
+        assert_eq!(sprite_of(&state, 0), Some(sprite));
+    }
+
+    #[test]
+    fn replacing_a_sprite_is_one_undo_step() {
+        let mut state = state_with_scene();
+        add_entity(&mut state, None).unwrap();
+        let first = Sprite::new(texture(1)).with_layer(0);
+        let second = Sprite::new(texture(2)).with_layer(5);
+        set_sprite(&mut state, 0, first).unwrap();
+        let depth = state.edits.depth();
+
+        set_sprite(&mut state, 0, second).unwrap();
+        assert_eq!(state.edits.depth().0, depth.0 + 1, "one step");
+        assert_eq!(sprite_of(&state, 0), Some(second));
+
+        undo(&mut state).unwrap();
+        assert_eq!(
+            sprite_of(&state, 0),
+            Some(first),
+            "the replaced sprite comes back"
+        );
+    }
+
+    #[test]
+    fn adding_a_sprite_entity_spawns_a_transform_and_selects_it() {
+        let mut state = state_with_scene();
+        let sprite = Sprite::new(texture(3)).with_size(Vec2::new(64.0, 32.0));
+
+        assert_eq!(
+            add_sprite_entity(&mut state, sprite, Vec2::new(4.0, 5.0)).unwrap(),
+            "added sprite entity #0"
+        );
+        assert_eq!(state.selection, Selection::Entity(0));
+        assert_eq!(position(&state, 0), Vec2::new(4.0, 5.0));
+        assert_eq!(sprite_of(&state, 0), Some(sprite));
+
+        undo(&mut state).unwrap();
+        assert!(entities(&state).is_empty());
+
+        redo(&mut state).unwrap();
+        assert_eq!(sprite_of(&state, 0), Some(sprite));
+    }
+
+    #[test]
+    fn setting_a_sprite_on_an_unknown_entity_is_refused() {
+        let mut state = state_with_scene();
+        let error = set_sprite(&mut state, 9, Sprite::new(texture(1))).unwrap_err();
+        assert!(error.contains("not in the scene"), "got: {error}");
     }
 }

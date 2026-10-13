@@ -65,7 +65,7 @@ use std::fmt;
 pub use cubic_derive::{Component, Inspectable};
 
 use crate::assets::AssetHandle;
-use crate::components::Transform;
+use crate::components::{Sprite, Transform};
 use crate::hierarchy::Parent;
 use crate::math::Vec2;
 use crate::render::Rgba;
@@ -631,11 +631,13 @@ impl ComponentRegistry {
     ///
     /// A game adds its types on top of this before opening a scene of theirs.
     /// `Transform` is addable; `Parent` is not — hierarchy is built by
-    /// reparenting, never by handing an entity a bare parent id.
+    /// reparenting, never by handing an entity a bare parent id — and `Sprite`
+    /// is not, because a sprite without a texture has nothing to draw.
     pub fn engine_defaults() -> Self {
         let mut registry = Self::new();
         registry.register_addable::<Transform>();
         registry.register::<Parent>();
+        registry.register::<Sprite>();
         registry
     }
 }
@@ -911,6 +913,29 @@ mod tests {
         assert_eq!(
             entry.fields.iter().map(Field::kind).collect::<Vec<_>>(),
             [FieldKind::Vec2, FieldKind::F32, FieldKind::Vec2]
+        );
+    }
+
+    #[test]
+    fn engine_defaults_registers_a_sprite_as_a_non_addable_component() {
+        let registry = ComponentRegistry::engine_defaults();
+        let sprite = registry.get("Sprite").expect("Sprite is engine-default");
+        assert!(!sprite.is_addable(), "a sprite needs a texture to exist");
+        assert_eq!(
+            sprite.fields.iter().map(Field::name).collect::<Vec<_>>(),
+            ["texture", "tint", "layer", "size"],
+            "Sprite's fields come from its derive, in declaration order"
+        );
+        assert_eq!(
+            sprite.fields.iter().map(Field::kind).collect::<Vec<_>>(),
+            [
+                FieldKind::Asset {
+                    kind: crate::assets::AssetKind::Texture
+                },
+                FieldKind::Color,
+                FieldKind::I32,
+                FieldKind::Vec2,
+            ]
         );
     }
 

@@ -13,7 +13,8 @@ use egui::Rect;
 use egui::Sense;
 use egui::Vec2;
 
-use cubic_core::components::Transform;
+use cubic_core::assets::TextureHandle;
+use cubic_core::components::{SPRITE_DEFAULT_SIZE, Sprite, Transform};
 use cubic_core::math;
 use cubic_core::reflect::FieldValue;
 use cubic_core::world::EntityId;
@@ -23,7 +24,7 @@ use crate::gizmo::{self, Handle};
 use crate::prefab::PrefabDrag;
 use crate::preview::{Preview, PreviewKind};
 use crate::state::{EditorState, LogLevel, Selection};
-use crate::viewport::ViewportHost;
+use crate::viewport::{TextureDrag, ViewportHost};
 
 /// Checkerboard cell edge, in points.
 const CELL: f32 = 16.0;
@@ -57,11 +58,19 @@ pub fn viewport(ui: &mut egui::Ui, state: &mut EditorState, host: &mut ViewportH
     ];
     camera_input(ui, host, &response, rect, size, ppp);
     prefab_drop(ui, state, host, &response, rect, size, ppp);
+    texture_drop(ui, state, host, &response, rect, size, ppp);
 
     let Some(texture) = host.prepare(size) else {
         placeholder(ui, rect, state);
         return;
     };
+
+    // Import anything the server staged this frame — a picker's choice, a
+    // dropped sprite — so a texture just chosen is drawn the same frame it
+    // loaded.
+    for error in host.pump_assets(state.assets.as_mut()) {
+        state.log(LogLevel::Error, format!("viewport asset: {error}"));
+    }
 
     let selected = selected_entity(state);
     // The gizmo is an editing tool: while play runs the scene belongs to the
@@ -205,6 +214,87 @@ fn prefab_drop(
         });
     let outcome = crate::prefab::instantiate(state, &payload.path, at);
     state.report(outcome);
+}
+
+/// Stamps a texture dropped from the asset panel onto the entity under the
+/// pointer, or onto a new entity when the drop lands on empty space.
+///
+/// The texture is loaded through the open project's asset server here; the
+/// bytes it stages are imported into the target by [`ViewportHost::pump_assets`]
+/// later in the frame, so a sprite is drawn the frame it is dropped. Guarded on
+/// play mode, because a drop edits a scene that belongs to the simulation while
+/// it runs.
+fn texture_drop(
+    ui: &egui::Ui,
+    state: &mut EditorState,
+    host: &ViewportHost,
+    response: &egui::Response,
+    rect: Rect,
+    size: [u32; 2],
+    ppp: f32,
+) {
+    if state.play.is_active() {
+        return;
+    }
+    let Some(payload) = response.dnd_release_payload::<TextureDrag>() else {
+        return;
+    };
+    let outcome = place_texture(ui, state, host, &payload.path, rect, size, ppp);
+    state.report(outcome);
+}
+
+/// The body of [`texture_drop`]: load the texture, then either replace the
+/// sprite of the entity under the pointer or spawn an entity holding one.
+fn place_texture(
+    ui: &egui::Ui,
+    state: &mut EditorState,
+    host: &ViewportHost,
+    path: &str,
+    rect: Rect,
+    size: [u32; 2],
+    ppp: f32,
+) -> Result<String, String> {
+    let pointer = ui.ctx().input(|input| input.pointer.interact_pos());
+    let texture = match state.assets.as_mut() {
+        None => return Err("no project is open — there are no textures to place".to_owned()),
+        Some(server) => server
+            .load_texture(path)
+            .map_err(|error| error.to_string())?,
+    };
+    let sprite = sized_sprite(state, path, texture);
+    let view = view_size(size);
+    let hit = match (pointer, state.scene.as_ref()) {
+        (Some(pointer), Some(scene)) => crate::viewport::pick(
+            &scene.world,
+            host.camera(),
+            view,
+            local_screen(pointer, rect, ppp),
+        ),
+        _ => None,
+    };
+    match hit {
+        Some(entity) => edit::set_sprite(state, entity, sprite),
+        None => {
+            let at = pointer
+                .map(|pointer| {
+                    host.camera()
+                        .to_world(local_screen(pointer, rect, ppp), view)
+                })
+                .unwrap_or(math::Vec2::ZERO);
+            edit::add_sprite_entity(state, sprite, at)
+        }
+    }
+}
+
+/// A sprite for `texture`, sized to the image's pixel dimensions when the file
+/// can be read, or to [`SPRITE_DEFAULT_SIZE`] otherwise.
+fn sized_sprite(state: &EditorState, path: &str, texture: TextureHandle) -> Sprite {
+    let size = state
+        .project_root()
+        .and_then(|root| image::image_dimensions(root.join(path)).ok())
+        .map(|(width, height)| math::Vec2::new(width as f32, height as f32))
+        .unwrap_or(SPRITE_DEFAULT_SIZE);
+    Sprite::new(texture).with_size(size)
 }
 
 /// A pointer in points over the panel as a target pixel.

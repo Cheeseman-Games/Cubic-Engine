@@ -4,7 +4,11 @@
 //! component that needs a GPU resource or a game's balance numbers belongs in
 //! the game crate, not in the engine.
 
+#[cfg(feature = "rendering")]
+use crate::assets::TextureHandle;
 use crate::math::{Mat4, Vec2, Vec3};
+#[cfg(feature = "rendering")]
+use crate::render::Rgba;
 
 /// 2D transform: position, rotation (radians, counter-clockwise), and scale.
 ///
@@ -136,6 +140,72 @@ pub fn transform_direction(matrix: &Mat4, direction: Vec3) -> Vec3 {
 /// Projects a clip-space position to normalized device coordinates (`-1..=1`).
 pub fn project_ndc(matrix: &Mat4, point: Vec3) -> Vec3 {
     transform_point(matrix, point)
+}
+
+/// The size a sprite takes when nothing says otherwise: a small, visible quad
+/// that a drop or a prefab can grow.
+pub const SPRITE_DEFAULT_SIZE: Vec2 = Vec2::new(32.0, 32.0);
+
+/// A textured quad drawn at an entity's [`Transform`].
+///
+/// The handle names the image; nothing decodes it here, so a sprite is the
+/// GPU-free half of what a backend draws. `tint` multiplies the sampled color
+/// (white leaves the image as it is), `size` is the quad's extent in world units
+/// before the transform's own scale, and `layer` orders the sprite against the
+/// others: a higher layer draws on top, and two sprites on one layer draw in
+/// entity id order, so the paint order is total and stable.
+///
+/// A sprite has no meaning without a texture, so it is deliberately not
+/// addable from the inspector's menu: it arrives with a texture, from a drop or
+/// a scene.
+#[cfg(feature = "rendering")]
+#[cfg_attr(
+    feature = "reflect",
+    derive(crate::reflect::Component, crate::reflect::Inspectable)
+)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sprite {
+    /// The image to sample.
+    pub texture: TextureHandle,
+    /// Multiplied into the sampled color; white leaves the image as it is.
+    pub tint: Rgba,
+    /// Draw order: a higher layer paints after a lower one.
+    pub layer: i32,
+    /// The quad's extent in world units, before the transform's scale.
+    pub size: Vec2,
+}
+
+#[cfg(feature = "rendering")]
+impl Sprite {
+    /// A sprite of `texture`, untinted, on layer 0, at
+    /// [`SPRITE_DEFAULT_SIZE`].
+    pub const fn new(texture: TextureHandle) -> Self {
+        Self {
+            texture,
+            tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            layer: 0,
+            size: SPRITE_DEFAULT_SIZE,
+        }
+    }
+
+    /// The same sprite sized to `size` world units.
+    pub const fn with_size(mut self, size: Vec2) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// The same sprite drawn on `layer`.
+    pub const fn with_layer(mut self, layer: i32) -> Self {
+        self.layer = layer;
+        self
+    }
+
+    /// The same sprite tinted by `tint`.
+    pub const fn with_tint(mut self, tint: Rgba) -> Self {
+        self.tint = tint;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -305,6 +375,55 @@ mod tests {
         assert_eq!(
             project_ndc(&Mat4::IDENTITY, Vec3::new(0.5, -0.5, 0.0)),
             Vec3::new(0.5, -0.5, 0.0)
+        );
+    }
+}
+
+#[cfg(all(test, feature = "rendering"))]
+mod sprite_tests {
+    use std::num::NonZeroU64;
+
+    use super::*;
+
+    fn texture(id: u64) -> TextureHandle {
+        TextureHandle::new(NonZeroU64::new(id).expect("a test uses non-zero ids"))
+    }
+
+    #[test]
+    fn a_new_sprite_is_untinted_at_the_default_size() {
+        let sprite = Sprite::new(texture(1));
+        assert_eq!(sprite.texture, texture(1));
+        assert_eq!(sprite.tint, Rgba::new(1.0, 1.0, 1.0, 1.0), "white tint");
+        assert_eq!(sprite.layer, 0);
+        assert_eq!(sprite.size, SPRITE_DEFAULT_SIZE);
+    }
+
+    #[test]
+    fn builders_set_one_field_at_a_time() {
+        let sprite = Sprite::new(texture(2))
+            .with_size(Vec2::new(8.0, 4.0))
+            .with_layer(3)
+            .with_tint(Rgba::rgb(0.5, 0.25, 0.0));
+        assert_eq!(
+            sprite,
+            Sprite {
+                texture: texture(2),
+                tint: Rgba::rgb(0.5, 0.25, 0.0),
+                layer: 3,
+                size: Vec2::new(8.0, 4.0),
+            }
+        );
+    }
+
+    #[test]
+    fn a_sprite_sits_at_its_transforms_aabb() {
+        let transform = Transform::from_position(Vec2::new(10.0, 5.0));
+        let sprite = Sprite::new(texture(1)).with_size(Vec2::new(8.0, 4.0));
+        // The quad is centred on the transform, so the box covers +/- half the
+        // sprite's size around the position.
+        assert_eq!(
+            transform.aabb(sprite.size),
+            crate::math::Rect::new(6.0, 3.0, 8.0, 4.0)
         );
     }
 }

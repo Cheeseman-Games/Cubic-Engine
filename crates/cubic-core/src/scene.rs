@@ -45,6 +45,8 @@ use ron::value::RawValue;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "rendering")]
+use crate::components::Sprite;
 use crate::components::Transform;
 use crate::hierarchy::Parent;
 use crate::world::{EntityId, World};
@@ -124,6 +126,8 @@ impl SceneRegistry {
         let mut registry = Self::new();
         registry.register::<Transform>("Transform");
         registry.register::<Parent>("Parent");
+        #[cfg(feature = "rendering")]
+        registry.register::<Sprite>("Sprite");
         registry
     }
 
@@ -558,6 +562,33 @@ mod tests {
             loaded.world.get::<Transform>(0),
             Some(&Transform::from_position(Vec2::new(1.0, 2.0)))
         );
+    }
+
+    #[cfg(feature = "rendering")]
+    #[test]
+    fn a_sprite_saves_and_reloads_by_handle() {
+        use std::num::NonZeroU64;
+
+        use crate::assets::TextureHandle;
+        use crate::components::Sprite;
+
+        let texture = TextureHandle::new(NonZeroU64::new(7).unwrap());
+        let mut world = World::new();
+        let id = world.spawn();
+        world.insert(id, Transform::default());
+        world.insert(id, Sprite::new(texture).with_layer(3));
+
+        let scene = Scene::from_world(&world, &registry()).unwrap();
+        let back: Scene = scene.to_text().unwrap().parse().unwrap();
+        assert_eq!(
+            back, scene,
+            "a sprite's handle survives the text round trip"
+        );
+
+        let world = back.to_world(&registry()).unwrap().world;
+        let sprite = world.get::<Sprite>(id).expect("the sprite came back");
+        assert_eq!(sprite.texture, texture);
+        assert_eq!(sprite.layer, 3);
     }
 
     #[test]

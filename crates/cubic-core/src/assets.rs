@@ -74,6 +74,7 @@ const FONT_EXTENSIONS: [&str; 4] = ["ttf", "otf", "ttc", "otc"];
 ///
 /// Handles are stable for the lifetime of the asset. When an asset is
 /// reloaded (dev mode), the same handle continues to refer to the new data.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct AssetHandle(NonZeroU64);
 
@@ -106,6 +107,7 @@ impl From<NonZeroU64> for AssetHandle {
 /// Produced by [`AssetServer::load_texture`] and what
 /// [`DrawCommand::Texture`](crate::render::DrawCommand::Texture) names, so the
 /// component a game stores it on is most of what a sprite is.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TextureHandle(AssetHandle);
 
@@ -142,6 +144,7 @@ impl fmt::Display for TextureHandle {
 /// A font asset is bytes until a backend hands them to a font database; the
 /// handle is what a scene stores so a reloaded font is picked up by whatever
 /// ends up drawing with it.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct FontHandle(AssetHandle);
 

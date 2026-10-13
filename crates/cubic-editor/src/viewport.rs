@@ -14,12 +14,14 @@
 //! orientation the renderer already fixed.
 //!
 //! Beyond framing the scene, this module owns the canvas furniture the editor
-//! draws over it: an adaptive grid, the scene's bounds, and the selection
-//! outline ([`build_scene`]), plus [`pick`], which turns a click back into the
-//! entity under it so the viewport can drive the selection the hierarchy and
-//! inspector panels already share.
+//! draws over it: an adaptive grid, the scene's bounds, the selection outline,
+//! and the sprites themselves in layer order ([`build_scene`]), plus [`pick`],
+//! which turns a click back into the entity under it so the viewport can drive
+//! the selection the hierarchy and inspector panels already share. A texture
+//! dragged out of the asset panel arrives as a [`TextureDrag`].
 
-use cubic_core::components::Transform;
+use cubic_core::assets::AssetServer;
+use cubic_core::components::{Sprite, Transform};
 use cubic_core::math::{Rect, Vec2};
 use cubic_core::render::{DrawList, Renderer, Rgba};
 use cubic_core::world::{EntityId, World};
@@ -28,6 +30,17 @@ use cubic_render::text::TextError;
 use eframe::egui_wgpu::RenderState;
 
 use crate::gizmo::{self, GizmoMode};
+
+/// What a texture row in the asset panel carries while it is dragged onto the
+/// viewport.
+///
+/// The path is project-relative, the same spelling an [`AssetServer`] loads it
+/// by; `Any + Send + Sync` is the shape egui's drag-and-drop stores payloads in.
+#[derive(Clone, Debug)]
+pub struct TextureDrag {
+    /// The texture's path, relative to the project root.
+    pub path: String,
+}
 
 /// Backdrop: what the panel shows before anything else draws, and the load-op
 /// color when the scene list carries no `Clear` of its own.
@@ -261,6 +274,26 @@ impl ViewportHost {
         self.texture
     }
 
+    /// Import whatever the asset server has queued into the target's store.
+    ///
+    /// Called right after [`prepare`](Self::prepare) returned `Some`, so a
+    /// texture that was just loaded — a picker's choice, a dropped sprite — is
+    /// drawable in the same frame. Nothing is drained when there is no target
+    /// yet: the bytes stay queued and the next frame imports them, rather than
+    /// being lost on the frame before the target exists.
+    ///
+    /// Returns one message per asset the decoder refused, for the caller to log.
+    pub fn pump_assets(&mut self, server: Option<&mut AssetServer>) -> Vec<String> {
+        let (Some(server), Some(target)) = (server, self.target.as_mut()) else {
+            return Vec::new();
+        };
+        server
+            .drain_pending()
+            .into_iter()
+            .filter_map(|asset| target.import(&asset).err().map(|error| error.to_string()))
+            .collect()
+    }
+
     /// Draw `world` through the camera into the target, with `selected`
     /// highlighted and, when `mode` names one and the entity is selected, its
     /// transform gizmo drawn on top.
@@ -291,13 +324,14 @@ impl ViewportHost {
 }
 
 /// Fill `list` with the scene as the viewport should show it: backdrop, grid,
-/// origin axes, the scene's bounds, one placeholder per transform-bearing
-/// entity, and an outline around `selected`.
+/// origin axes, the scene's bounds, a placeholder for each transform-bearing
+/// entity with no sprite, every sprite in layer order, and an outline around
+/// `selected`.
 ///
 /// Everything is mapped through `camera` into the `view` rectangle's pixels,
-/// so the list is ready to hand to a renderer sized the same. Entities whose
-/// placeholder falls entirely outside the view are dropped — a scene can hold
-/// thousands of them, and the panel resizes every frame anyway.
+/// so the list is ready to hand to a renderer sized the same. Boxes that fall
+/// entirely outside the view are dropped — a scene can hold thousands of them,
+/// and the panel resizes every frame anyway.
 pub fn build_scene(
     list: &mut DrawList,
     world: &World,
@@ -325,17 +359,22 @@ pub fn build_scene(
         stroke_rect(list, min.x, min.y, size.x, size.y, 1.0, BOUNDS);
     }
 
-    // The selected entity's placeholder is remembered rather than outlined as
-    // it is drawn, so the outline lands on top of every marker, not just the
-    // ones painted after it.
+    // The selected entity's box is remembered rather than outlined as it is
+    // drawn, so the outline lands on top of every sprite, not just the ones
+    // painted after it.
     let mut selected_bounds: Option<(f32, f32, f32, f32)> = None;
+
+    // Placeholders first: an entity with no sprite has nothing to draw but the
+    // box that shows where it is. They sit under every sprite, so a stand-in
+    // never hides the art it belongs to.
     for (id, transform) in world.iter::<Transform>() {
+        if world.get::<Sprite>(id).is_some() {
+            continue;
+        }
         let bounds = transform.aabb(Vec2::splat(MARKER_SIZE));
         let min = camera.to_screen(Vec2::new(bounds.x, bounds.y), view);
         let size = Vec2::new(bounds.w, bounds.h) * camera.zoom;
-        let off_view =
-            min.x > view.x || min.y > view.y || min.x + size.x < 0.0 || min.y + size.y < 0.0;
-        if off_view {
+        if off_view(min, size, view) {
             continue;
         }
         if selected == Some(id) {
@@ -345,9 +384,52 @@ pub fn build_scene(
             list.fill_rect(min.x, min.y, size.x, size.y, MARKER);
         }
     }
+
+    // Sprites, back to front: sorted by layer, then by id so same-layer sprites
+    // have a stable, total order. This is exactly the order the renderer runs
+    // the commands in, so the canvas matches the layer list.
+    let mut sprites: Vec<(i32, EntityId)> = world
+        .iter::<Sprite>()
+        .map(|(id, sprite)| (sprite.layer, id))
+        .collect();
+    sprites.sort_unstable();
+    for (_, id) in sprites {
+        let (Some(transform), Some(sprite)) = (world.get::<Transform>(id), world.get::<Sprite>(id))
+        else {
+            continue;
+        };
+        let bounds = transform.aabb(sprite.size);
+        let min = camera.to_screen(Vec2::new(bounds.x, bounds.y), view);
+        let size = Vec2::new(bounds.w, bounds.h) * camera.zoom;
+        if off_view(min, size, view) {
+            continue;
+        }
+        // The texture command is axis-aligned and whole-image, so a rotated
+        // transform draws its unrotated bounding box — the same approximation
+        // picking and the scene bounds use.
+        list.draw_texture(sprite.texture, min.x, min.y, size.x, size.y, sprite.tint);
+        if selected == Some(id) {
+            selected_bounds = Some((min.x, min.y, size.x, size.y));
+        }
+    }
+
     if let Some((x, y, w, h)) = selected_bounds {
         stroke_rect(list, x, y, w, h, 2.0, SELECTION);
     }
+}
+
+/// Whether a screen box lies entirely outside the `view` rectangle, so drawing
+/// it is wasted work.
+fn off_view(min: Vec2, size: Vec2, view: Vec2) -> bool {
+    min.x > view.x || min.y > view.y || min.x + size.x < 0.0 || min.y + size.y < 0.0
+}
+
+/// The world-space extent the viewport treats an entity as having: its sprite's
+/// size when it has one, else the fixed marker size.
+fn entity_size(world: &World, id: EntityId) -> Vec2 {
+    world
+        .get::<Sprite>(id)
+        .map_or(Vec2::splat(MARKER_SIZE), |sprite| sprite.size)
 }
 
 /// Draw an adaptive grid of one-pixel lines over the view.
@@ -380,12 +462,12 @@ fn draw_grid(list: &mut DrawList, camera: &ViewportCamera, view: Vec2) {
     }
 }
 
-/// The smallest box covering every entity's placeholder, or `None` for an
-/// empty scene.
+/// The smallest box covering every entity's extent, or `None` for an empty
+/// scene.
 fn scene_bounds(world: &World) -> Option<Rect> {
     let mut bounds: Option<Rect> = None;
-    for (_, transform) in world.iter::<Transform>() {
-        let aabb = transform.aabb(Vec2::splat(MARKER_SIZE));
+    for (id, transform) in world.iter::<Transform>() {
+        let aabb = transform.aabb(entity_size(world, id));
         bounds = Some(match bounds {
             Some(bounds) => bounds.union(&aabb),
             None => aabb,
@@ -403,24 +485,37 @@ fn stroke_rect(list: &mut DrawList, x: f32, y: f32, w: f32, h: f32, thickness: f
     list.fill_rect(x + w - thickness, y, thickness, h, color);
 }
 
-/// The entity whose placeholder covers `screen` (a target pixel), if any.
+/// The entity whose extent covers `screen` (a target pixel), if any.
 ///
-/// "Topmost" is the highest id: entities are drawn in id order, so the last
-/// one painted — the one the click should land on — is the greatest id whose
-/// box contains the point. A click that hits nothing picks nothing, so the
-/// caller can clear the selection rather than leave a stale one.
+/// "Topmost" is the paint order [`build_scene`] draws in: a sprite beats a
+/// placeholder, a higher layer beats a lower one, and a greater id wins a tie.
+/// A click that hits nothing picks nothing, so the caller can clear the
+/// selection rather than leave a stale one.
 pub fn pick(world: &World, camera: &ViewportCamera, view: Vec2, screen: Vec2) -> Option<EntityId> {
     let point = camera.to_world(screen, view);
-    let mut hit: Option<EntityId> = None;
+    let mut hit: Option<(i32, EntityId)> = None;
     for (id, transform) in world.iter::<Transform>() {
         if transform
-            .aabb(Vec2::splat(MARKER_SIZE))
+            .aabb(entity_size(world, id))
             .contains(point.x, point.y)
         {
-            hit = Some(hit.map_or(id, |best| best.max(id)));
+            let key = paint_key(world, id);
+            hit = Some(match hit {
+                Some(best) if best >= key => best,
+                _ => key,
+            });
         }
     }
-    hit
+    hit.map(|(_, id)| id)
+}
+
+/// An entity's place in the viewport's paint order: sprites sort above
+/// placeholders, a higher layer sorts later, and the id breaks ties.
+fn paint_key(world: &World, id: EntityId) -> (i32, EntityId) {
+    match world.get::<Sprite>(id) {
+        Some(sprite) => (sprite.layer, id),
+        None => (i32::MIN, id),
+    }
 }
 
 #[cfg(test)]
@@ -462,6 +557,30 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The textures drawn, in command order, as `(handle id, x, y, w, h)`.
+    fn textures(list: &DrawList) -> Vec<(u64, f32, f32, f32, f32)> {
+        list.commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Texture {
+                    texture,
+                    x,
+                    y,
+                    w,
+                    h,
+                    ..
+                } => Some((texture.asset().id(), *x, *y, *w, *h)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn texture(id: u64) -> cubic_core::assets::TextureHandle {
+        cubic_core::assets::TextureHandle::new(
+            std::num::NonZeroU64::new(id).expect("a test uses non-zero ids"),
+        )
     }
 
     #[test]
@@ -722,5 +841,128 @@ mod tests {
         let screen = camera.to_screen(Vec2::new(500.0, 500.0), view);
 
         assert_eq!(pick(&world, &camera, view, screen), None);
+    }
+
+    #[test]
+    fn sprites_draw_back_to_front_in_layer_order() {
+        let mut world = World::new();
+        let front = world.spawn();
+        world.insert(front, Transform::default());
+        world.insert(front, Sprite::new(texture(1)).with_layer(5));
+        let back = world.spawn();
+        world.insert(back, Transform::default());
+        world.insert(back, Sprite::new(texture(2)).with_layer(-1));
+
+        let camera = ViewportCamera::default();
+        let view = Vec2::new(200.0, 200.0);
+        let mut list = DrawList::new();
+        build_scene(&mut list, &world, &camera, view, None);
+
+        let ids: Vec<u64> = textures(&list).into_iter().map(|t| t.0).collect();
+        assert_eq!(ids, vec![2, 1], "the lower layer is painted first");
+        assert!(
+            rects_of(&list, MARKER).is_empty(),
+            "a sprite replaces its placeholder"
+        );
+    }
+
+    #[test]
+    fn same_layer_sprites_break_ties_by_entity_id() {
+        let mut world = World::new();
+        let first = world.spawn();
+        world.insert(first, Transform::default());
+        world.insert(first, Sprite::new(texture(1)));
+        let second = world.spawn();
+        world.insert(second, Transform::default());
+        world.insert(second, Sprite::new(texture(2)));
+
+        let camera = ViewportCamera::default();
+        let view = Vec2::new(200.0, 200.0);
+        let mut list = DrawList::new();
+        build_scene(&mut list, &world, &camera, view, None);
+
+        let ids: Vec<u64> = textures(&list).into_iter().map(|t| t.0).collect();
+        assert_eq!(ids, vec![1, 2], "same layer paints in id order");
+    }
+
+    #[test]
+    fn a_selected_sprite_is_outlined_over_the_others() {
+        let mut world = World::new();
+        let entity = world.spawn();
+        world.insert(entity, Transform::default());
+        world.insert(entity, Sprite::new(texture(1)).with_layer(3));
+
+        let camera = ViewportCamera::default();
+        let view = Vec2::new(200.0, 200.0);
+        let mut list = DrawList::new();
+        build_scene(&mut list, &world, &camera, view, Some(entity));
+
+        assert_eq!(textures(&list).len(), 1, "the sprite is still drawn");
+        assert_eq!(
+            rects_of(&list, SELECTION).len(),
+            4,
+            "the outline is four bars"
+        );
+        assert!(
+            rects_of(&list, MARKER).is_empty(),
+            "no placeholder behind the sprite"
+        );
+    }
+
+    #[test]
+    fn picking_prefers_the_sprite_on_the_higher_layer() {
+        let mut world = World::new();
+        let below = world.spawn();
+        world.insert(below, Transform::default());
+        world.insert(below, Sprite::new(texture(1)).with_layer(0));
+        let above = world.spawn();
+        world.insert(above, Transform::default());
+        // A *lower* id but a higher layer still wins the click.
+        world.insert(above, Sprite::new(texture(2)).with_layer(4));
+
+        let camera = ViewportCamera::default();
+        let view = Vec2::new(200.0, 200.0);
+        let screen = camera.to_screen(Vec2::ZERO, view);
+
+        assert_eq!(pick(&world, &camera, view, screen), Some(above));
+    }
+
+    #[test]
+    fn picking_uses_a_sprites_size_not_the_marker() {
+        let mut world = World::new();
+        let big = world.spawn();
+        world.insert(big, Transform::default());
+        world.insert(big, Sprite::new(texture(1)).with_size(Vec2::splat(100.0)));
+
+        let camera = ViewportCamera::default();
+        let view = Vec2::new(400.0, 400.0);
+        // Well outside the 16-unit marker, but inside the 100-unit sprite.
+        let screen = camera.to_screen(Vec2::new(40.0, 0.0), view);
+
+        assert_eq!(pick(&world, &camera, view, screen), Some(big));
+    }
+
+    #[test]
+    fn the_scene_bounds_cover_a_sprites_full_extent() {
+        let mut world = World::new();
+        let entity = world.spawn();
+        world.insert(entity, Transform::default());
+        world.insert(entity, Sprite::new(texture(1)).with_size(Vec2::splat(50.0)));
+
+        let camera = ViewportCamera::default();
+        let view = Vec2::new(400.0, 400.0);
+        let mut list = DrawList::new();
+        build_scene(&mut list, &world, &camera, view, None);
+
+        let bars = rects_of(&list, BOUNDS);
+        assert_eq!(bars.len(), 4, "the bounds are an outline of four bars");
+        // A 50x50 sprite spans +/-25, not the marker's +/-8.
+        let min = camera.to_screen(Vec2::new(-25.0, -25.0), view);
+        let (left, top) = bars
+            .iter()
+            .fold((f32::MAX, f32::MAX), |(l, t), &(x, y, _, _)| {
+                (l.min(x), t.min(y))
+            });
+        assert_close(Vec2::new(left, top), min, "bounds follow the sprite");
     }
 }

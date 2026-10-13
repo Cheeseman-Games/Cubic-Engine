@@ -1,10 +1,13 @@
 //! Right pane, under the inspector: the open project's textures and prefabs.
 //!
 //! Textures are listed with a thumbnail so a project's art is recognisable at a
-//! glance, and a click previews the file the way the project tree does. Prefabs
-//! are listed as rows that can be dragged onto the viewport, where releasing one
-//! stamps the fragment into the open scene (see [`crate::prefab`]). Under both,
-//! a row saves the current selection back out as a prefab file.
+//! glance, and a click previews the file the way the project tree does. A
+//! texture row can also be dragged onto the viewport, where releasing it gives
+//! the entity under the pointer a `Sprite` (see
+//! [`crate::viewport::TextureDrag`]). Prefabs are listed the same way: dragging
+//! one onto the viewport stamps the fragment into the open scene (see
+//! [`crate::prefab`]). Under both, a row saves the current selection back out as
+//! a prefab file.
 //!
 //! Like every panel it reads while it draws and defers its changes: the
 //! thumbnail cache is the only thing touched in place, and a click, a drop, and
@@ -17,6 +20,7 @@ use cubic_core::prefab::Prefab as CorePrefab;
 
 use crate::prefab::{self, PrefabDrag};
 use crate::state::{EditorState, Selection};
+use crate::viewport::TextureDrag;
 
 /// The edge of a texture thumbnail, in points.
 const THUMB: f32 = 48.0;
@@ -59,7 +63,8 @@ pub fn assets(ui: &mut egui::Ui, state: &mut EditorState) {
     }
 }
 
-/// The project's textures, a thumbnail beside each path; a click previews one.
+/// The project's textures, a draggable thumbnail beside each path; a click
+/// previews one, a drop on the viewport gives an entity a sprite.
 fn textures(ui: &mut egui::Ui, state: &mut EditorState, open: &mut Option<PathBuf>) {
     ui.label("Textures");
     let Some(root) = state.project_root().map(Path::to_path_buf) else {
@@ -74,22 +79,34 @@ fn textures(ui: &mut egui::Ui, state: &mut EditorState, open: &mut Option<PathBu
         ui.weak("(no textures in this project)");
         return;
     }
+    ui.weak("Drag one onto the viewport to set a sprite.");
     for path in paths {
-        ui.horizontal(|ui| {
-            let clicked = match state.thumbnails.get(ui.ctx(), &root, &path) {
-                Some(texture) => ui
-                    .add(
-                        egui::Image::from_texture(texture)
-                            .fit_to_exact_size(egui::vec2(THUMB, THUMB))
-                            .sense(egui::Sense::click()),
-                    )
-                    .clicked(),
-                None => missing_thumbnail(ui),
-            };
-            if ui.selectable_label(false, &path).clicked() || clicked {
-                *open = Some(root.join(&path));
-            }
-        });
+        let row = ui.dnd_drag_source(
+            egui::Id::new(("texture", &path)),
+            TextureDrag { path: path.clone() },
+            |ui| {
+                let mut opened = false;
+                ui.horizontal(|ui| {
+                    let clicked = match state.thumbnails.get(ui.ctx(), &root, &path) {
+                        Some(texture) => ui
+                            .add(
+                                egui::Image::from_texture(texture)
+                                    .fit_to_exact_size(egui::vec2(THUMB, THUMB))
+                                    .sense(egui::Sense::click()),
+                            )
+                            .clicked(),
+                        None => missing_thumbnail(ui),
+                    };
+                    opened = clicked || ui.selectable_label(false, &path).clicked();
+                });
+                opened
+            },
+        );
+        if row.inner {
+            *open = Some(root.join(&path));
+        }
+        row.response
+            .on_hover_text(format!("{path}\nDrag onto the viewport to set a sprite."));
     }
 }
 

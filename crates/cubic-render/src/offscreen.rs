@@ -14,9 +14,10 @@
 //! `Rgba` values the `DrawList` carries, so what the host samples is what the
 //! commands asked for.
 
+use cubic_core::assets::PendingAsset;
 use cubic_core::render::{DrawList, Rgba};
 
-use crate::assets::TextureStore;
+use crate::assets::{TextureError, TextureStore};
 use crate::render2d::{QuadBatch, WgpuRenderer2d};
 use crate::text::{TextError, TextPipeline};
 
@@ -87,6 +88,17 @@ impl Offscreen2d {
     /// rendered pixels back rather than displaying them (the tests do).
     pub fn texture(&self) -> &wgpu::Texture {
         &self.texture
+    }
+
+    /// Import a queued asset into this target's texture store.
+    ///
+    /// The store is where a [`DrawCommand::Texture`](cubic_core::render::DrawCommand::Texture)
+    /// resolves its handle, so a host that draws sprites imports through here
+    /// before [`render`](Self::render). A re-import replaces the pixels behind a
+    /// handle already being drawn — that is hot reload — and a failed decode is
+    /// the decoder's refusal, leaving whatever the handle held alone.
+    pub fn import(&mut self, asset: &PendingAsset) -> Result<(), TextureError> {
+        self.textures.import(asset)
     }
 
     /// Resize the target, recreating the texture.
