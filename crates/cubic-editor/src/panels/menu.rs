@@ -3,6 +3,7 @@
 use egui::Button;
 use egui::Panel;
 
+use crate::edit;
 use crate::project;
 use crate::run;
 use crate::state::{EditorState, LogLevel, Pending};
@@ -49,6 +50,25 @@ pub fn menu_bar(ui: &mut egui::Ui, state: &mut EditorState) {
                 if clickable(ui, "Quit", "Ctrl+Q").clicked() {
                     ui.close();
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+
+            ui.menu_button("Edit", |ui| {
+                let can_undo = state.edits.can_undo();
+                let undo_item = Button::new("Undo").shortcut_text("Ctrl+Z").frame(false);
+                if ui.add_enabled(can_undo, undo_item).clicked() {
+                    ui.close();
+                    let outcome = edit::undo(state);
+                    state.report(outcome);
+                }
+                let can_redo = state.edits.can_redo();
+                let redo_item = Button::new("Redo")
+                    .shortcut_text("Ctrl+Shift+Z / Ctrl+Y")
+                    .frame(false);
+                if ui.add_enabled(can_redo, redo_item).clicked() {
+                    ui.close();
+                    let outcome = edit::redo(state);
+                    state.report(outcome);
                 }
             });
 
