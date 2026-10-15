@@ -8,7 +8,7 @@
 use crate::assets::TextureHandle;
 use crate::math::{Mat4, Vec2, Vec3};
 #[cfg(feature = "rendering")]
-use crate::render::Rgba;
+use crate::render::{Rgba, TextureFilter, TexturedQuad, UvRect};
 
 /// 2D transform: position, rotation (radians, counter-clockwise), and scale.
 ///
@@ -155,9 +155,11 @@ pub const SPRITE_DEFAULT_SIZE: Vec2 = Vec2::new(32.0, 32.0);
 /// others: a higher layer draws on top, and two sprites on one layer draw in
 /// entity id order, so the paint order is total and stable.
 ///
-/// A sprite has no meaning without a texture, so it is deliberately not
-/// addable from the inspector's menu: it arrives with a texture, from a drop or
-/// a scene.
+/// A sprite draws a region of its image — the whole of it by default — so one
+/// sheet can feed many sprites: `region` slices it, `flip_x`/`flip_y` mirror
+/// that slice, and `filter` picks how the slice is sampled. A sprite has no
+/// meaning without a texture, so it is deliberately not addable from the
+/// inspector's menu: it arrives with a texture, from a drop or a scene.
 #[cfg(feature = "rendering")]
 #[cfg_attr(
     feature = "reflect",
@@ -168,24 +170,45 @@ pub const SPRITE_DEFAULT_SIZE: Vec2 = Vec2::new(32.0, 32.0);
 pub struct Sprite {
     /// The image to sample.
     pub texture: TextureHandle,
+    /// The region of the image to sample: a whole sheet or one cell of it.
+    ///
+    /// Not reflected: slicing a sheet is a sheet-editing job, not something a
+    /// property grid should do a number at a time.
+    #[cfg_attr(feature = "reflect", inspect(skip))]
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub region: UvRect,
     /// Multiplied into the sampled color; white leaves the image as it is.
     pub tint: Rgba,
     /// Draw order: a higher layer paints after a lower one.
     pub layer: i32,
     /// The quad's extent in world units, before the transform's scale.
     pub size: Vec2,
+    /// Mirror the region across its vertical axis.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub flip_x: bool,
+    /// Mirror the region across its horizontal axis.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub flip_y: bool,
+    /// How the region is sampled: smooth when scaled, or hard texel edges.
+    #[cfg_attr(feature = "reflect", inspect(select = ["nearest", "linear"]))]
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub filter: TextureFilter,
 }
 
 #[cfg(feature = "rendering")]
 impl Sprite {
     /// A sprite of `texture`, untinted, on layer 0, at
-    /// [`SPRITE_DEFAULT_SIZE`].
+    /// [`SPRITE_DEFAULT_SIZE`], drawing the whole image with the default filter.
     pub const fn new(texture: TextureHandle) -> Self {
         Self {
             texture,
+            region: UvRect::WHOLE,
             tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
             layer: 0,
             size: SPRITE_DEFAULT_SIZE,
+            flip_x: false,
+            flip_y: false,
+            filter: TextureFilter::Linear,
         }
     }
 
@@ -205,6 +228,51 @@ impl Sprite {
     pub const fn with_tint(mut self, tint: Rgba) -> Self {
         self.tint = tint;
         self
+    }
+
+    /// The same sprite drawing only `region` of its image.
+    pub const fn with_region(mut self, region: UvRect) -> Self {
+        self.region = region;
+        self
+    }
+
+    /// The same sprite mirrored horizontally and/or vertically.
+    pub const fn with_flip(mut self, flip_x: bool, flip_y: bool) -> Self {
+        self.flip_x = flip_x;
+        self.flip_y = flip_y;
+        self
+    }
+
+    /// The same sprite sampled with `filter`.
+    pub const fn with_filter(mut self, filter: TextureFilter) -> Self {
+        self.filter = filter;
+        self
+    }
+
+    /// The region to sample, with the sprite's flips applied.
+    ///
+    /// A flip is a mirrored region rather than extra instance state, so this is
+    /// the one place the two come together and the shader only ever sees a
+    /// [`UvRect`].
+    pub fn uv(&self) -> UvRect {
+        self.region.flipped(self.flip_x, self.flip_y)
+    }
+
+    /// This sprite as the quad a backend draws: the image and region, the
+    /// tint, filter, and a destination rectangle `x, y, w, h` in the caller's
+    /// space with a `rotation` about its centre.
+    pub fn textured_quad(&self, x: f32, y: f32, w: f32, h: f32, rotation: f32) -> TexturedQuad {
+        TexturedQuad {
+            texture: self.texture,
+            x,
+            y,
+            w,
+            h,
+            rotation,
+            uv: self.uv(),
+            filter: self.filter,
+            color: self.tint,
+        }
     }
 }
 
@@ -396,6 +464,9 @@ mod sprite_tests {
         assert_eq!(sprite.tint, Rgba::new(1.0, 1.0, 1.0, 1.0), "white tint");
         assert_eq!(sprite.layer, 0);
         assert_eq!(sprite.size, SPRITE_DEFAULT_SIZE);
+        assert_eq!(sprite.region, UvRect::WHOLE, "the whole image by default");
+        assert!(!sprite.flip_x && !sprite.flip_y, "unflipped by default");
+        assert_eq!(sprite.filter, TextureFilter::Linear);
     }
 
     #[test]
@@ -403,16 +474,63 @@ mod sprite_tests {
         let sprite = Sprite::new(texture(2))
             .with_size(Vec2::new(8.0, 4.0))
             .with_layer(3)
-            .with_tint(Rgba::rgb(0.5, 0.25, 0.0));
+            .with_tint(Rgba::rgb(0.5, 0.25, 0.0))
+            .with_region(UvRect::new(0.5, 0.0, 1.0, 0.5))
+            .with_flip(true, false)
+            .with_filter(TextureFilter::Nearest);
         assert_eq!(
             sprite,
             Sprite {
                 texture: texture(2),
+                region: UvRect::new(0.5, 0.0, 1.0, 0.5),
                 tint: Rgba::rgb(0.5, 0.25, 0.0),
                 layer: 3,
                 size: Vec2::new(8.0, 4.0),
+                flip_x: true,
+                flip_y: false,
+                filter: TextureFilter::Nearest,
             }
         );
+    }
+
+    #[test]
+    fn a_sprites_uv_is_its_region_with_its_flips_applied() {
+        let region = UvRect::new(0.25, 0.1, 0.75, 0.6);
+        let plain = Sprite::new(texture(1)).with_region(region);
+        assert_eq!(plain.uv(), region, "no flip leaves the region alone");
+        assert_eq!(
+            plain.with_flip(true, false).uv(),
+            region.flipped(true, false),
+            "a horizontal flip mirrors the region"
+        );
+        assert_eq!(
+            plain.with_flip(false, true).uv(),
+            region.flipped(false, true),
+            "a vertical flip mirrors the region"
+        );
+        assert_eq!(
+            plain.with_flip(true, true).uv(),
+            region.flipped(true, true),
+            "both flips mirror both ways"
+        );
+    }
+
+    #[test]
+    fn a_sprites_quad_carries_its_region_flip_filter_and_tint() {
+        let sprite = Sprite::new(texture(4))
+            .with_region(UvRect::new(0.0, 0.0, 0.5, 0.5))
+            .with_flip(true, false)
+            .with_filter(TextureFilter::Nearest)
+            .with_tint(Rgba::rgb(0.1, 0.2, 0.3));
+
+        let quad = sprite.textured_quad(1.0, 2.0, 3.0, 4.0, 0.5);
+
+        assert_eq!(quad.texture, texture(4));
+        assert_eq!((quad.x, quad.y, quad.w, quad.h), (1.0, 2.0, 3.0, 4.0));
+        assert_eq!(quad.rotation, 0.5);
+        assert_eq!(quad.uv, sprite.uv(), "the quad draws the flipped region");
+        assert_eq!(quad.filter, TextureFilter::Nearest);
+        assert_eq!(quad.color, sprite.tint);
     }
 
     #[test]

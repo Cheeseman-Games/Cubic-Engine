@@ -17,6 +17,8 @@ pub use crate::assets::{
     AssetBundle, AssetError, AssetEvent, AssetHandle, AssetKind, AssetServer, FontHandle,
     LoadedAsset, PendingAsset, TextureHandle,
 };
+#[cfg(feature = "rendering")]
+pub use crate::components::Sprite;
 pub use crate::components::{Transform, transform_direction, transform_point};
 pub use crate::hierarchy::{
     Parent, children_of, descendants, is_ancestor, parent_map, parent_of, roots,
@@ -31,7 +33,9 @@ pub use crate::reflect::{
     FieldValue, Inspectable, Selectable,
 };
 #[cfg(feature = "rendering")]
-pub use crate::render::{DrawCommand, DrawList, NullRenderer, Renderer, Rgba};
+pub use crate::render::{
+    DrawCommand, DrawList, NullRenderer, Renderer, Rgba, TextureFilter, TexturedQuad, UvRect,
+};
 #[cfg(feature = "scene")]
 pub use crate::scene::{LoadedScene, Scene, SceneError, SceneRegistry};
 pub use crate::world::{EntityId, World};

@@ -398,18 +398,26 @@ pub fn build_scene(
         else {
             continue;
         };
+        // The transform's axis-aligned box decides whether the sprite is worth
+        // drawing; the quad itself is then placed rotated about the transform's
+        // position, so a turned sprite is drawn turned rather than as its box.
         let bounds = transform.aabb(sprite.size);
         let min = camera.to_screen(Vec2::new(bounds.x, bounds.y), view);
-        let size = Vec2::new(bounds.w, bounds.h) * camera.zoom;
-        if off_view(min, size, view) {
+        let extent = Vec2::new(bounds.w, bounds.h) * camera.zoom;
+        if off_view(min, extent, view) {
             continue;
         }
-        // The texture command is axis-aligned and whole-image, so a rotated
-        // transform draws its unrotated bounding box — the same approximation
-        // picking and the scene bounds use.
-        list.draw_texture(sprite.texture, min.x, min.y, size.x, size.y, sprite.tint);
+        let center = camera.to_screen(transform.position, view);
+        let size = sprite.size * transform.scale * camera.zoom;
+        list.draw_textured(sprite.textured_quad(
+            center.x - size.x * 0.5,
+            center.y - size.y * 0.5,
+            size.x,
+            size.y,
+            transform.rotation,
+        ));
         if selected == Some(id) {
-            selected_bounds = Some((min.x, min.y, size.x, size.y));
+            selected_bounds = Some((min.x, min.y, extent.x, extent.y));
         }
     }
 
@@ -564,14 +572,21 @@ mod tests {
         list.commands
             .iter()
             .filter_map(|command| match command {
-                DrawCommand::Texture {
-                    texture,
-                    x,
-                    y,
-                    w,
-                    h,
-                    ..
-                } => Some((texture.asset().id(), *x, *y, *w, *h)),
+                DrawCommand::Texture(quad) => {
+                    Some((quad.texture.asset().id(), quad.x, quad.y, quad.w, quad.h))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The texture commands' whole quads, in command order, for asserting on
+    /// everything a sprite draw carries.
+    fn quads(list: &DrawList) -> Vec<cubic_core::render::TexturedQuad> {
+        list.commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Texture(quad) => Some(*quad),
                 _ => None,
             })
             .collect()
@@ -864,6 +879,77 @@ mod tests {
             rects_of(&list, MARKER).is_empty(),
             "a sprite replaces its placeholder"
         );
+    }
+
+    #[test]
+    fn a_sprite_draws_a_rotated_quad_about_its_transform() {
+        let mut world = World::new();
+        let entity = world.spawn();
+        world.insert(
+            entity,
+            Transform::new(
+                Vec2::new(10.0, 5.0),
+                std::f32::consts::FRAC_PI_2,
+                Vec2::splat(2.0),
+            ),
+        );
+        world.insert(
+            entity,
+            Sprite::new(texture(1)).with_size(Vec2::new(8.0, 4.0)),
+        );
+
+        let camera = ViewportCamera::default();
+        let view = Vec2::new(200.0, 200.0);
+        let mut list = DrawList::new();
+        build_scene(&mut list, &world, &camera, view, None);
+
+        let quads = quads(&list);
+        assert_eq!(quads.len(), 1, "one sprite, one quad");
+        let quad = quads[0];
+        let center = camera.to_screen(Vec2::new(10.0, 5.0), view);
+        // 8x4 at scale 2 and zoom 1 is 16x8, centred on the transform.
+        assert_close(
+            Vec2::new(quad.x, quad.y),
+            Vec2::new(center.x - 8.0, center.y - 4.0),
+            "the quad is centred on the transform",
+        );
+        assert_eq!((quad.w, quad.h), (16.0, 8.0), "scaled to world size");
+        assert_eq!(
+            quad.rotation,
+            std::f32::consts::FRAC_PI_2,
+            "the transform's rotation reaches the draw"
+        );
+    }
+
+    #[test]
+    fn a_sprites_region_and_flip_reach_the_draw() {
+        use cubic_core::render::{TextureFilter, UvRect};
+
+        let mut world = World::new();
+        let entity = world.spawn();
+        world.insert(entity, Transform::default());
+        world.insert(
+            entity,
+            Sprite::new(texture(1))
+                .with_size(Vec2::splat(10.0))
+                .with_region(UvRect::new(0.0, 0.0, 0.5, 0.5))
+                .with_flip(false, true)
+                .with_filter(TextureFilter::Nearest),
+        );
+
+        let camera = ViewportCamera::default();
+        let view = Vec2::new(200.0, 200.0);
+        let mut list = DrawList::new();
+        build_scene(&mut list, &world, &camera, view, None);
+
+        let quads = quads(&list);
+        assert_eq!(quads.len(), 1);
+        assert_eq!(
+            quads[0].uv,
+            UvRect::new(0.0, 0.5, 0.5, 0.0),
+            "the vertical flip swaps the region's v edges"
+        );
+        assert_eq!(quads[0].filter, TextureFilter::Nearest);
     }
 
     #[test]

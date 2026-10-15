@@ -10,7 +10,7 @@
 //! AssetServer::load_texture("assets/logo.png")
 //!   → handle + PendingAsset { handle, bytes, version, .. }
 //!   → TextureStore::import(&pending)          (this module)
-//!   → DrawCommand::Texture { texture: handle, .. }
+//!   → DrawCommand::Texture(quad)              (cubic_core::render)
 //!   → WgpuRenderer2d::render(.., &store)      (crate::render2d)
 //! ```
 //!
@@ -94,7 +94,7 @@ struct Imported {
 pub struct TextureBinding<'a> {
     /// The sampled image.
     pub view: &'a wgpu::TextureView,
-    /// The texture bound to the store's sampler, ready for the draw pipeline.
+    /// The texture bound to the store's samplers, ready for the draw pipeline.
     pub bind_group: &'a wgpu::BindGroup,
 }
 
@@ -108,10 +108,14 @@ pub struct TextureBinding<'a> {
 pub struct TextureStore {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    /// One sampler for every texture, so a draw needs one binding rather than one
-    /// per texture. Linear filtering with edge clamping: the filter a sprite
-    /// wants, and no way for a filtered tap to read past the edge.
+    /// The smooth sampler: linear filtering with edge clamping, the filter a
+    /// scaled sprite wants, and no way for a filtered tap to read past the edge.
     sampler: wgpu::Sampler,
+    /// The pixel-art sampler: nearest filtering, edge-clamped like
+    /// [`sampler`](Self::sampler). Which of the two a draw uses is chosen per
+    /// instance in the shader, so one image can be drawn sharp in one sprite and
+    /// smooth in another without a texture of its own.
+    nearest_sampler: wgpu::Sampler,
     layout: wgpu::BindGroupLayout,
     imported: BTreeMap<u64, Imported>,
 }
@@ -128,6 +132,16 @@ impl TextureStore {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("cubic-texture nearest sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
@@ -150,12 +164,19 @@ impl TextureStore {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         Self {
             device,
             queue,
             sampler,
+            nearest_sampler,
             layout,
             imported: BTreeMap::new(),
         }
@@ -322,7 +343,11 @@ impl TextureStore {
         self.imported.is_empty()
     }
 
-    /// A bind group sampling `view` with the store's sampler.
+    /// A bind group sampling `view` with the store's samplers.
+    ///
+    /// Both samplers are bound at once: the shader picks between the smooth and
+    /// nearest one per instance, so a bind group never has to change when a sprite
+    /// flips its filter.
     fn bind_group(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("cubic-texture bind group"),
@@ -335,6 +360,10 @@ impl TextureStore {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.nearest_sampler),
                 },
             ],
         })

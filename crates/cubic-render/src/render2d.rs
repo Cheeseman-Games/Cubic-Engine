@@ -50,7 +50,8 @@ unsafe impl bytemuck::Zeroable for RectInstance {}
 unsafe impl bytemuck::Pod for RectInstance {}
 
 /// Per-instance GPU data for a textured quad: the same rectangle and tint as a
-/// rect, plus the region of the texture to sample.
+/// rect, plus the region of the texture to sample, a rotation about the
+/// rectangle's centre and the filter to sample the region with.
 ///
 /// The tint is multiplied into the sampled color, so a fully white pixel draws as
 /// the tint alone — which is what lets one image be tinted per sprite.
@@ -58,18 +59,29 @@ unsafe impl bytemuck::Pod for RectInstance {}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextureInstance {
     pub rect: [f32; 4],
-    /// `u0, v0, u1, v1` in 0..=1. A whole image is [`WHOLE_TEXTURE_UV`]; a
-    /// sub-rectangle is what a sprite sheet slices out.
+    /// `u0, v0, u1, v1` in 0..=1. A whole image is `[0, 0, 1, 1]`; a
+    /// sub-rectangle is what a sprite sheet slices out, and a flip is a
+    /// sub-rectangle with its edges swapped.
     pub uv: [f32; 4],
     pub color: [f32; 4],
+    /// Rotation about the rectangle's centre, in radians.
+    pub rotation: f32,
+    /// `1.0` to pick the nearest sampler, `0.0` the smooth one. A float rather
+    /// than a bool because the vertex layout has no integer attribute here, and
+    /// the shader wants a select in any case.
+    pub nearest: f32,
 }
 
-// SAFETY: `TextureInstance` is `repr(C)` and only holds plain f32 arrays.
+// SAFETY: `TextureInstance` is `repr(C)` and only holds plain f32 arrays and
+// scalars.
 unsafe impl bytemuck::Zeroable for TextureInstance {}
 unsafe impl bytemuck::Pod for TextureInstance {}
 
-/// The whole of a texture, which is what a plain image draws.
-pub const WHOLE_TEXTURE_UV: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+/// The nearest/linear flag a `TextureInstance` carries, as the float the shader
+/// selects with.
+fn filter_flag(nearest: bool) -> f32 {
+    if nearest { 1.0 } else { 0.0 }
+}
 
 fn into_array(color: Rgba) -> [f32; 4] {
     [color.r, color.g, color.b, color.a]
@@ -152,22 +164,17 @@ impl<'a> QuadBatch<'a> {
                         push_rect(&mut rects, &mut runs, [*x, *y, *w, *h], *color);
                     }
                 }
-                DrawCommand::Texture {
-                    texture,
-                    x,
-                    y,
-                    w,
-                    h,
-                    color,
-                } => {
+                DrawCommand::Texture(quad) => {
                     if clearing {
                         let index = textures.len();
                         textures.push(TextureInstance {
-                            rect: [*x, *y, *w, *h],
-                            uv: WHOLE_TEXTURE_UV,
-                            color: into_array(*color),
+                            rect: [quad.x, quad.y, quad.w, quad.h],
+                            uv: quad.uv.as_array(),
+                            color: into_array(quad.color),
+                            rotation: quad.rotation,
+                            nearest: filter_flag(quad.filter.is_nearest()),
                         });
-                        extend_run(&mut runs, BatchKind::Textures, index, Some(*texture));
+                        extend_run(&mut runs, BatchKind::Textures, index, Some(quad.texture));
                     }
                 }
                 DrawCommand::Text {
@@ -312,13 +319,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// The textured variant: the same geometry, with the sampled region walked across
-/// the quad and the fragment multiplied by the instance tint.
+/// The textured variant: the same geometry, with the region walked across the
+/// quad, a rotation about the quad's centre, and the sampled color multiplied by
+/// the instance tint.
 ///
 /// The region's four corners come from the instance rather than being the quad's
-/// own corners, which is the only thing sprite-sheet slicing needs later — the
-/// command model cannot ask for a sub-rectangle yet, so every `uv` is the whole
-/// image and the mapping below reduces to `corner`.
+/// own corners, which is what sprite-sheet slicing is: a sub-rectangle maps onto
+/// the same quad, and a flip is a region whose edges are swapped. The filter is
+/// per instance too, so one image can be drawn sharp in a pixel-art sprite and
+/// smooth in a scaled one within the same batched draw.
 const TEXTURE_SHADER: &str = r#"
 struct Screen {
     size: vec2<f32>,
@@ -330,23 +339,38 @@ struct Screen {
 // parse.
 @group(1) @binding(0) var image_sampler: sampler;
 @group(1) @binding(1) var image_tex: texture_2d<f32>;
+@group(1) @binding(2) var nearest_sampler: sampler;
 
 struct VsIn {
     @location(0) corner: vec2<f32>,
     @location(1) rect: vec4<f32>,
     @location(2) uv: vec4<f32>,
     @location(3) color: vec4<f32>,
+    @location(4) rotation: f32,
+    @location(5) nearest: f32,
 };
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
+    // Flat: the filter is the same across the whole instance, and interpolating
+    // it would only risk a flicker at the seam between two quads.
+    @location(2) @interpolate(flat) nearest: f32,
 };
 
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
-    let world = in.rect.xy + in.corner * in.rect.zw;
+    // Turn about the rectangle's centre, scaling before rotating to match
+    // `Transform`: work in the rect's local frame, then place the result.
+    let local = (in.corner - vec2<f32>(0.5, 0.5)) * in.rect.zw;
+    let sin_r = sin(in.rotation);
+    let cos_r = cos(in.rotation);
+    let turned = vec2<f32>(
+        local.x * cos_r - local.y * sin_r,
+        local.x * sin_r + local.y * cos_r,
+    );
+    let world = in.rect.xy + in.rect.zw * 0.5 + turned;
     let ndc = vec2<f32>(
         2.0 * world.x / screen.size.x - 1.0,
         1.0 - 2.0 * world.y / screen.size.y,
@@ -354,11 +378,13 @@ fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     // `in.uv` is the region this quad samples and `in.corner` walks across it, so
-    // a whole image maps corner to corner and a sub-rectangle maps to itself.
-    // v is not flipped: `corner.y` already grows downward like the screen
-    // transform above, and row 0 of a decoded image is its top.
+    // a whole image maps corner to corner, a sub-rectangle maps to itself, and a
+    // flipped region samples its rows the other way. v is not flipped: `corner.y`
+    // already grows downward like the screen transform above, and row 0 of a
+    // decoded image is its top.
     out.uv = in.uv.xy + in.corner * (in.uv.zw - in.uv.xy);
     out.color = in.color;
+    out.nearest = in.nearest;
     return out;
 }
 
@@ -366,7 +392,14 @@ fn vs_main(in: VsIn) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // WGSL takes the texture before the sampler, which is the reverse of the
     // wgpu-level bind group order and reads backwards.
-    return textureSample(image_tex, image_sampler, in.uv) * in.color;
+    // Level 0 explicitly: the filter is a per-instance value, and a
+    // `textureSample` whose sampler differs across the draw would be
+    // non-uniform control flow. These textures have one level, so nothing is
+    // lost, and the two taps are chosen between by the instance's flag.
+    let sampled_smooth = textureSampleLevel(image_tex, image_sampler, in.uv, 0.0);
+    let sampled_nearest = textureSampleLevel(image_tex, nearest_sampler, in.uv, 0.0);
+    let sampled = select(sampled_smooth, sampled_nearest, in.nearest > 0.5);
+    return sampled * in.color;
 }
 "#;
 
@@ -514,7 +547,7 @@ impl WgpuRenderer2d {
                     Some(wgpu::VertexBufferLayout {
                         array_stride: size_of::<TextureInstance>() as wgpu::BufferAddress,
                         step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &wgpu::vertex_attr_array![1 => Float32x4, 2 => Float32x4, 3 => Float32x4],
+                        attributes: &wgpu::vertex_attr_array![1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32, 5 => Float32],
                     }),
                 ],
             },
@@ -761,7 +794,7 @@ impl WgpuRenderer2d {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cubic_core::render::Renderer;
+    use cubic_core::render::{Renderer, TextureFilter, TexturedQuad, UvRect};
     use std::num::NonZeroU64;
 
     fn run(kind: BatchKind, start: usize, len: usize) -> BatchRun {
@@ -1001,9 +1034,58 @@ mod tests {
         assert_eq!(batch.textures.len(), 1);
         assert_eq!(batch.textures[0].rect, [4.0, 6.0, 8.0, 10.0]);
         assert_eq!(batch.textures[0].color, [1.0, 0.5, 0.0, 0.5]);
-        // The command model has no sub-rectangle yet, so a texture draws whole.
-        assert_eq!(batch.textures[0].uv, WHOLE_TEXTURE_UV);
+        // A plain image draws the whole texture, unrotated and smoothly.
+        assert_eq!(batch.textures[0].uv, UvRect::WHOLE.as_array());
+        assert_eq!(batch.textures[0].rotation, 0.0);
+        assert_eq!(batch.textures[0].nearest, 0.0);
         assert_eq!(batch.runs, vec![texture_run(image, 0, 1)]);
+    }
+
+    #[test]
+    fn a_textured_quad_keeps_its_region_rotation_and_filter() {
+        let image = handle(1);
+        let mut list = DrawList::new();
+        list.clear(Rgba::rgb(0.0, 0.0, 0.0));
+        list.draw_textured(TexturedQuad {
+            texture: image,
+            x: 1.0,
+            y: 2.0,
+            w: 3.0,
+            h: 4.0,
+            rotation: 0.5,
+            uv: UvRect::new(0.25, 0.0, 0.75, 0.5),
+            filter: TextureFilter::Nearest,
+            color: Rgba::rgb(1.0, 1.0, 1.0),
+        });
+
+        let batch = QuadBatch::from_list(&list, [800.0, 600.0], Rgba::rgb(0.0, 0.0, 0.0));
+        assert_eq!(batch.textures.len(), 1);
+        let instance = batch.textures[0];
+        assert_eq!(instance.rect, [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(instance.uv, [0.25, 0.0, 0.75, 0.5], "the region survives");
+        assert_eq!(instance.rotation, 0.5);
+        assert_eq!(instance.nearest, 1.0, "nearest is the nonzero flag");
+    }
+
+    #[test]
+    fn a_flipped_sprite_swaps_its_instance_uv_edges() {
+        use cubic_core::components::Sprite;
+
+        let image = handle(1);
+        let mut list = DrawList::new();
+        list.clear(Rgba::rgb(0.0, 0.0, 0.0));
+        let sprite = Sprite::new(image)
+            .with_region(UvRect::new(0.0, 0.0, 1.0, 0.5))
+            .with_flip(true, false);
+        let quad = sprite.textured_quad(0.0, 0.0, 10.0, 10.0, 0.0);
+        list.draw_textured(quad);
+
+        let batch = QuadBatch::from_list(&list, [800.0, 600.0], Rgba::rgb(0.0, 0.0, 0.0));
+        assert_eq!(
+            batch.textures[0].uv,
+            [1.0, 0.0, 0.0, 0.5],
+            "the flip is a uv swap, not extra instance state"
+        );
     }
 
     #[test]

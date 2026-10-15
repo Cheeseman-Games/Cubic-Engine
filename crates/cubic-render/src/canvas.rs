@@ -38,7 +38,7 @@ impl CanvasRenderer {
                     self.ctx
                         .fill_rect((*x).into(), (*y).into(), (*w).into(), (*h).into());
                 }
-                DrawCommand::Texture { .. } => {
+                DrawCommand::Texture(_) => {
                     // This backend has no device-side asset store to sample from —
                     // it draws through the 2D context's own image cache instead,
                     // which `TextureStore` does not feed. A sprite is skipped rather

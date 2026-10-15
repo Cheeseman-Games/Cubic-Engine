@@ -923,8 +923,11 @@ mod tests {
         assert!(!sprite.is_addable(), "a sprite needs a texture to exist");
         assert_eq!(
             sprite.fields.iter().map(Field::name).collect::<Vec<_>>(),
-            ["texture", "tint", "layer", "size"],
-            "Sprite's fields come from its derive, in declaration order"
+            [
+                "texture", "tint", "layer", "size", "flip_x", "flip_y", "filter"
+            ],
+            "Sprite's fields come from its derive, in declaration order; the \
+             region is skipped as a sheet-editing detail"
         );
         assert_eq!(
             sprite.fields.iter().map(Field::kind).collect::<Vec<_>>(),
@@ -935,6 +938,9 @@ mod tests {
                 FieldKind::Color,
                 FieldKind::I32,
                 FieldKind::Vec2,
+                FieldKind::Bool,
+                FieldKind::Bool,
+                FieldKind::Select(&["nearest", "linear"]),
             ]
         );
     }

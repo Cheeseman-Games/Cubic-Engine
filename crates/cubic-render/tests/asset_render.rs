@@ -6,9 +6,9 @@
 
 mod common;
 
-use common::{any, matches, near, pixel, read_pixels, target};
+use common::{any, count, matches, near, pixel, read_pixels, target};
 use cubic_core::assets::{AssetKind, AssetServer, PendingAsset, TextureHandle};
-use cubic_core::render::{DrawList, Renderer, Rgba};
+use cubic_core::render::{DrawList, Renderer, Rgba, TextureFilter, TexturedQuad, UvRect};
 use cubic_render::assets::TextureStore;
 use cubic_render::render2d::{QuadBatch, WgpuRenderer2d};
 use cubic_render::text::TextPipeline;
@@ -170,6 +170,169 @@ fn a_sprite_covers_the_text_under_it() {
             && p[0] < 60
             && p[2] < 60),
         "the green sprite drew over the label"
+    );
+}
+
+/// A sprite drawn from one quadrant of an image must show only that quadrant:
+/// this is the sprite-sheet slice, and the bottom-left of the logo is blue.
+#[test]
+#[ignore = "needs a wgpu adapter"]
+fn a_sprite_draws_only_its_region() {
+    let (device, queue) = match common::device() {
+        Some(device) => device,
+        None => return,
+    };
+    let target = target(&device, W, H, FORMAT);
+    let view = target.create_view(&Default::default());
+    let mut textures = TextureStore::new(&device, &queue);
+    let Some(handle) = import(&mut textures) else {
+        return;
+    };
+
+    let mut list = DrawList::new();
+    list.clear(Rgba::rgb(0.0, 0.0, 0.0));
+    // The bottom-left quadrant (u 0..0.5, v 0.5..1) stretched across the quad.
+    list.draw_textured(TexturedQuad {
+        texture: handle,
+        x: 100.0,
+        y: 50.0,
+        w: 64.0,
+        h: 64.0,
+        rotation: 0.0,
+        uv: UvRect::new(0.0, 0.5, 0.5, 1.0),
+        filter: TextureFilter::Nearest,
+        color: Rgba::rgb(1.0, 1.0, 1.0),
+    });
+
+    let mut renderer = WgpuRenderer2d::new(&device, &queue, FORMAT, &textures);
+    let batch = QuadBatch::from_list(&list, [W as f32, H as f32], Rgba::rgb(0.0, 0.0, 0.0));
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer
+        .render(&mut encoder, &view, &batch, None, &textures)
+        .expect("render a region");
+    queue.submit([encoder.finish()]);
+
+    let pixels = read_pixels(&device, &queue, &target, W, H);
+    // Every corner of the quad is the blue quadrant, not the others.
+    for (x, y) in [(110, 60), (150, 60), (110, 100), (150, 100)] {
+        assert!(
+            near(pixel(&pixels, x, y), Rgba::rgb(0.0, 0.0, 1.0), 40),
+            "({x}, {y}) is the blue quadrant"
+        );
+    }
+}
+
+/// A rotated sprite draws its image turned with it: a quarter turn sends the
+/// top-left (red) quadrant of the logo to the top right of the quad.
+#[test]
+#[ignore = "needs a wgpu adapter"]
+fn a_rotated_sprite_paints_its_turned_quad() {
+    let (device, queue) = match common::device() {
+        Some(device) => device,
+        None => return,
+    };
+    let target = target(&device, W, H, FORMAT);
+    let view = target.create_view(&Default::default());
+    let mut textures = TextureStore::new(&device, &queue);
+    let Some(handle) = import(&mut textures) else {
+        return;
+    };
+
+    let mut list = DrawList::new();
+    list.clear(Rgba::rgb(0.0, 0.0, 0.0));
+    list.draw_textured(TexturedQuad {
+        texture: handle,
+        x: 100.0,
+        y: 50.0,
+        w: 64.0,
+        h: 64.0,
+        rotation: std::f32::consts::FRAC_PI_2,
+        uv: UvRect::WHOLE,
+        filter: TextureFilter::Linear,
+        color: Rgba::rgb(1.0, 1.0, 1.0),
+    });
+
+    let mut renderer = WgpuRenderer2d::new(&device, &queue, FORMAT, &textures);
+    let batch = QuadBatch::from_list(&list, [W as f32, H as f32], Rgba::rgb(0.0, 0.0, 0.0));
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer
+        .render(&mut encoder, &view, &batch, None, &textures)
+        .expect("render a rotated sprite");
+    queue.submit([encoder.finish()]);
+
+    let pixels = read_pixels(&device, &queue, &target, W, H);
+    // The quarter turn is about the quad's centre, so the image turns with it:
+    // red (top-left) lands top-right, green bottom-right, blue top-left, white
+    // bottom-left.
+    assert!(
+        near(pixel(&pixels, 150, 60), Rgba::rgb(1.0, 0.0, 0.0), 40),
+        "the red quadrant turned to the top right"
+    );
+    assert!(
+        near(pixel(&pixels, 150, 100), Rgba::rgb(0.0, 1.0, 0.0), 40),
+        "the green quadrant turned to the bottom right"
+    );
+    assert!(
+        near(pixel(&pixels, 114, 60), Rgba::rgb(0.0, 0.0, 1.0), 40),
+        "the blue quadrant turned to the top left"
+    );
+}
+
+/// Two sprites of one image can pick different filters within a single batched
+/// draw: the nearest one keeps hard texel edges, the smooth one blends.
+#[test]
+#[ignore = "needs a wgpu adapter"]
+fn filtering_is_chosen_per_sprite() {
+    let (device, queue) = match common::device() {
+        Some(device) => device,
+        None => return,
+    };
+    let target = target(&device, W, H, FORMAT);
+    let view = target.create_view(&Default::default());
+    let mut textures = TextureStore::new(&device, &queue);
+    let Some(handle) = import_bytes(&mut textures, &checker(), "checker.png") else {
+        return;
+    };
+
+    // A 2x2 black/white checker magnified 80x: nearest gives only the two ends,
+    // smooth blends greys between them.
+    let quad = |x: f32, filter: TextureFilter| TexturedQuad {
+        texture: handle,
+        x,
+        y: 40.0,
+        w: 160.0,
+        h: 160.0,
+        rotation: 0.0,
+        uv: UvRect::WHOLE,
+        filter,
+        color: Rgba::rgb(1.0, 1.0, 1.0),
+    };
+    let mut list = DrawList::new();
+    list.clear(Rgba::rgb(0.0, 0.0, 0.0));
+    // Contiguous and the same texture, so both are one run — the filter can only
+    // differ because it is per instance.
+    list.draw_textured(quad(20.0, TextureFilter::Nearest));
+    list.draw_textured(quad(260.0, TextureFilter::Linear));
+
+    let mut renderer = WgpuRenderer2d::new(&device, &queue, FORMAT, &textures);
+    let batch = QuadBatch::from_list(&list, [W as f32, H as f32], Rgba::rgb(0.0, 0.0, 0.0));
+    assert_eq!(batch.runs.len(), 1, "one texture, one run");
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer
+        .render(&mut encoder, &view, &batch, None, &textures)
+        .expect("render both filters");
+    queue.submit([encoder.finish()]);
+
+    let pixels = read_pixels(&device, &queue, &target, W, H);
+    let grey = |p: [u8; 4]| p[0] > 40 && p[0] < 215;
+    assert_eq!(
+        count(&pixels, 20..180, 40..200, grey),
+        0,
+        "nearest kept hard black/white edges"
+    );
+    assert!(
+        count(&pixels, 260..420, 40..200, grey) > 0,
+        "linear blended greys between the texels"
     );
 }
 
@@ -474,6 +637,17 @@ fn solid(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
         height,
         image::Rgba(color),
     ))
+}
+
+/// A 2×2 black-and-white checker: the smallest image whose magnification shows
+/// the difference between nearest and linear sampling.
+fn checker() -> Vec<u8> {
+    let mut image = image::RgbaImage::new(2, 2);
+    image.put_pixel(0, 0, image::Rgba([0, 0, 0, 255]));
+    image.put_pixel(1, 0, image::Rgba([255, 255, 255, 255]));
+    image.put_pixel(0, 1, image::Rgba([255, 255, 255, 255]));
+    image.put_pixel(1, 1, image::Rgba([0, 0, 0, 255]));
+    encode(image)
 }
 
 /// The logo with its left and right halves exchanged, same size, same handle —
